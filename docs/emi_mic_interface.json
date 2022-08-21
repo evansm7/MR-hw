@@ -1,0 +1,36 @@
+// Wavedrom file for EMI-to-MIC bus interface unit
+//
+
+{signal: [
+  {name: 'clk', 					wave: 'p.....................................'},
+  {name: 'Notes', 					wave: 'x2.2...2.........x.2.2.....2.......x', data: [ 'I req', 'D req waits', 'D req begins', 'MIC stall',
+                                                                              'D wins, req begins', 'Waiting I req begins, runs'
+  ]},
+  {name: 'State', 					wave: 'x23.|.24.|.......2|...4.|..23.|....2', data: ['IDLE', 'REQI', 'IDLE', 'REQD', 'IDLE', 'REQD', 'IDLE', 'REQI', 'IDLE']},
+
+  {name: 'EMI-I Req',   			wave: '01..|.0..|........|.1...|.....|....0'},
+  {name: 'EMI-I Valid', 			wave: '0...|10..|........|.....|.....|1...0'},
+  {name: 'EMI-I Rdata', 			wave: 'x...|2x..|........|.....|.....|2222x', data: ['RD0', 'RD1', 'RD2', 'RD3', 'RD4']},
+  {name: 'EMI-I Size',  			wave: 'x2..|.x..|........|.2...|.....|....x', data: ['32b', 'CL']},
+  {name: 'EMI-I Addr',  			wave: 'x2..|.x..|........|.2...|.....|....x', data: ['Aw', 'Ay']},
+
+  {name: 'EMI-D Req',   			wave: '0..1|....|.......0|.1...|..0..|.....'},
+  {name: 'EMI-D Valid', 			wave: '0...|....|.1011010|.....|.10..|.....'},
+  {name: 'EMI-D Rdata', 			wave: 'xxxx|x...|........|.....|.....|.....', data: ['D0', 'D1', 'D2', 'D3']},
+  {name: 'EMI-D Wdata', 			wave: 'xxx2|....|..2.22.x|.2...|..x..|.....', data: ['WD0', 'WD1', 'WD2', 'WD3', 'WD4']},
+  {name: 'EMI-D RnW',   			wave: 'x..0|....|.......x|.0...|..x..|.....'},
+  {name: 'EMI-D Size',  			wave: 'x..2|....|.......x|.2...|..x..|.....', data: ['CL', '32b']},
+  {name: 'EMI-D Addr',  			wave: 'x..2|....|.......x|.2...|..x..|.....', data: ['Ax', 'Az']},
+
+  {name: 'MIC req_ready', 			wave: '1..x|x1.x|.......x|0.1.x|..1.x|.....'},
+  {name: 'MIC req_start', 			wave: '0.10|..10|........|...10|...10|.....'},
+  {name: 'MIC req_RnW', 			wave: 'xx1.|.x0.|.......x|...0.|..x1.|....x'},
+  {name: 'MIC req_beats', 			wave: 'xx2.|.x2.|.......x|...2.|..x2.|....x', data: ['1', '4', '1', '4']},
+  {name: 'MIC req_address', 		wave: 'x.2.|.x2.|.......x|...2.|..x2.|....x', data: ['Aw', 'Ax', 'Az', 'Ay']},
+  {name: 'MIC read_data', 			wave: 'x...|2x..|........|.....|..x..|2222x', data: ['RD0', 'RD1', 'RD2', 'RD3', 'RD4']},
+  {name: 'MIC read_data_valid I', 	wave: '0...|10..|........|.....|.....|1...0'},
+  {name: 'MIC read_data_ready O', 	wave: '1...|....|........|.....|.....|.....'},
+  {name: 'MIC write_data', 			wave: 'x...|..2.|..2.22.x|...2.|..x..|.....', data: ['WD0', 'WD1', 'WD2', 'WD3', 'WD4']},
+  {name: 'MIC write_data_valid O', 	wave: '1...|....|........|.....|.....|.....'},
+  {name: 'MIC write_data_ready I', 	wave: '0...|....|.1011010|.....|.10..|.....'},
+]}

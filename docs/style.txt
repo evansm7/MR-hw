@@ -1,0 +1,21 @@
+
+Avoiding 'assign' except to plug together outputs (wire) from internal stuff.
+
+All non-trivial combinatorial logic occurs in always @(*) blocks, and operates
+on reg types.  This means it's not entirely clear looking at a declaration
+whether it'll be a wire or not, but makes the logic MUCH easier to read.
+
+# Assignments
+
+I'm using a "take last assignment" style in combinatorial blocks, where defaults
+are assigned up-front and then the same signal is later (conditionally?)
+re-assigned.  This is also a bit clearer, especially to my C brain.
+
+
+# Unused lower bits
+
+   wire [31:0] 		     ifetch_pc;
+
+All fields always go down to zero.  Doing otherwise makes VCD viewing annoying
+in some cases.  In the case of PC, bits [1:0] cannot be non-zero: they're driven
+by constants and never read, so I expect the compiler to remove them.

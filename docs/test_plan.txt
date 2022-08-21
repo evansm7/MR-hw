@@ -1,0 +1,29 @@
+Test ideas:
+
+
+Branches:
+- Branch-link not-taken does not update LR, does not branch
+-- But does update CTR if required
+
+
+Faults:
+- in shadow of branch T/NT
+- in shadow of isync
+- LD faults, and instruction in IF at the time of the LD in MEM also causes an ifetch fault (take only the LD fault)
+- on next page
+- exception with store in shadow (no store!)
+
+Synchronisation issues:
+- icbi and isync
+- mtmsr w/ DR/IR change in shadow
+- TLBI and ptesync (guarantee new transls are visible)
+- BATs
+
+
+Exceptions:
+
+*	{Branch, SVC, IRQ, DEC} at 0ffc,0ff8,0ff4, 0ff0 where page 1000 faults; do not see fault
+*	Memory fault at 0ffc,0ff8,0ff4, 0ff0 where page 100 faults.  See mem fault only.
+
+- Store in shadow of branch or exception (SVC, older ld/st fault) doesn't affect memory.
+

@@ -1,0 +1,227 @@
+
+Instruction fetch
+=================
+
+Inputs:
+
+wb_new_pc+msr
+wb_annul
+mem_new_pc+msr
+exe_annul
+de_stall
+
+
+Output:
+
+- instruction
+- fault code (alignment, IRQ, TF, PF)
+- valid
+
+
+In any cycle, one of:
+
+- Fetch from current_pc, output instruction (or fault) plus current_pc, set current_pc += 4
+
+- Try to fetch from current_pc but be stalled by I$ until a future cycle when the fetch
+  happens.
+
+- stall:  Hold current output, if valid.  (Don't fetch if it was otherwise going to, or hold fault).
+  Could optimise and permit going valid but for now IF does not do this.  Stall means
+  a complete stall of IF.  (See below re new_pc!)  (May be easier if stall means hold IFF valid.)
+
+- Annul:  causes the current cycle to output valid=0, i.e. stops a read.  Typically annul is
+  seen immediately preceding (as well as during) a new_pc cycle.
+  WB or MEM assert this to stop IF pushing a new instruction, the cycle before giving new_pc.
+  This is less important for a branch (could make new_pc annul, and do this all from MEM),
+  but some exceptions take 2 cycles to process in WB:  cycle 1 annuls separately to the
+  new_pc.  If it didn't, then IF would pop a new instruction in the pipeline in the 1st cycle,
+  which would need annulling again in the 2nd cycle.  (Still, as long as MEM's annulled in cycle
+  1, the new_pc could zap IF (as well as annul any new instructions), i.e. annul in c1 & c2.)
+
+- new_pc:  Causes the next valid instruction to come from provided address.  This may be next cycle
+  if not stalled, or might be some future cycle (with a number of valid=0 cycles before then).
+  This takes precedence over annul!  (Could both be asserted in same cycle.)
+  This takes precedence over stall!  (Upstream stall makes no sense when new_pc/annul asserted)
+
+State:
+- A fault emits a valid fault token instead of a valid instruction.  IF then stops fetching
+  instructions in the shadow (mainly because, for a PF, they'll just be more faults) until
+  a new_pc is received.
+
+Interrupts:
+- An IRQ looks the same as a legitimate fetch-that-faulted.
+- An IRQ just transforms an otherwise-fetch cycle into a no-fetch, and generates a fault in
+  same way as a fetch.  This means that an IRQ is only respected on cycles that aren't stalled.
+- There could be a way to both try a fetch so as to determine ISI or not, but then not actually do a
+  cache access.  The ITLB/Cache block could see two types of requests: fetch and probe.
+  (Fetch either returns an instruction, stalls, or returns a fault; probe returns a flag for
+  fault-or-not.)
+-- However however, it is even easier still to do a fetch (including take a miss, page fault etc.)
+   and simply set out_is_fault on a correctly-fetched instruction!  Lazy but OK, and priority
+   is correct.
+
+Constraint:
+- When doing a lookup of TLB/cache, can't change the inputs if that's flagging stall.
+  This means that although new_pc might occur in the meantime, a new fetch does
+  not begin until the original fetch completes!
+- Stash the fetched address somewhere and use that whilst stall=1
+
+Notes:
+- Possible to remove annul; DE/EXE/MEM still get annul (so branch clears stuff) but a branch
+  does not need to squash current instruction from EXE.  Let it fetch, then let MEM assert annul
+  at the same time as new_pc.  (annul for the benefit of DE/EXE/MEM, new_pc for IF's benefit.)
+- 'fault' state just stops fetching.  If we remove annul, then a new_pc needs to break out of
+  this state.
+- HOWEVER: Advantage to annul is that letting it fetch might cause a cache miss/fill delay
+  for a line we don't want.  So KEEP ANNUL - that just means "don't initiate a fetch if
+  you're not already", e.g. lowest-priority in evaluation.
+
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+|  State  | mem_valid   | Fetch fault, or IRQ/DEC | | de_stalled | annul | new_pc  |                       Effect                        |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | 1           | 0                       | | 0          | 0     | 0       | Fetch instr at current_pc.  current_pc = fetch_pc + |
+|         |             |                         | |            |       |         | 4.  Output valid.                                   |
+|         |             |                         | |            |       |         | Note: see new_pc_hold; this cycle clears            |
+|         |             |                         | |            |       |         | new_pc_pending.                                     |
+|         |             |                         | |            |       |         |                                                     |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | x           | x                       | | 1          | x     | 0       | Don't initiate a new fetch.  Hold current output    |
+|         |             |                         | |            |       |         | (whether valid instr, valid fault, or invalid).     |
+|         |             |                         | |            |       |         | Note: de_stalled ignored if new_pc.                 |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | 1 (for      | 1                       | | 0          | 0     | 0       | Output fault record.  Output valid.  Move to FAULT  |
+|         | fault)      |                         | |            |       |         | state.  Output PC = fetch_pc (might be new_pc)      |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | 0           | x (SBZ)                 | | x          | x     | 0       | Lookup causes a stall; must not change              |
+|         |             |                         | |            |       |         | current_pc/msr (see below for new_pc behaviour).    |
+|         |             |                         | |            |       |         | Output invalid.                                     |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| x       | 1           | 0                       | | x          | x     | 1       | Fetch instr at new_pc.  current_pc = new_pc + 4.    |
+|         |             |                         | |            |       |         | Output valid.  state=NORMAL.                        |
+|         |             |                         | |            |       |         | Note: de_stalled ignored, fetch even if that says   |
+|         |             |                         | |            |       |         | stalled (should never happen as other p'line stages |
+|         |             |                         | |            |       |         | should be being annuled this cycle too).            |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| x       | 1           | 1                       | | x          | x     | 1       | new_pc accepted as above - but output fault record. |
+|         |             |                         | |            |       |         | Output valid.  state=FAULT.                         |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| x       | 0           | x                       | | x          | x     | 1       | new_pc captured into current_pc, but not a fetch    |
+|         |             |                         | |            |       |         | cycle.  Next regular cycle fetches from current_pc. |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | x           | x                       | | 0          | 0     | 0       | Output IRQ exception record, valid. Move to FAULT   |
+|         |             |                         | |            |       |         | state.  (Lower prio than ISI!)                      |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| NORMAL  | x           | x                       | | x          | 1     | 0       | Output invalid.  (Could change current_pc, because  |
+|         |             |                         | |            |       |         | next cycle new_pc is expected anyway.)              |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+| FAULT   | x           | x                       | | x          | x     | 0       | Don't fetch.  Output invalid. (Waits for new pc!)   |
++---------+-------------+-------------------------+-+------------+-------+---------+-----------------------------------------------------+
+
+
+Output validity
+===============
+
+Goes valid when:
+- Fetch cycle and valid output and not de_stalled
+-- Whether data output or fault output
+
+Goes invalid when:
+- mem_stalled
+- state=FAULT
+- annulled
+
+Stays same when:
+- de_stalled
+-- Might be invalid (e.g. fault state, or mem stall cycle) and stays that way
+-- Might be valid e.g. last cycle fetched successfully; this cycle do not fetch and do not change
+
+
+Lots of PCs
+===========
+
+current_pc:  	The PC state held in IF.  Usually, the thing that generates fetch_pc.
+fetch_pc:  	The address actually fetched from.  This is generated as follows:
+	- If new_pc valid, fetch_pc = new_pc.
+	- Else fetch_pc = current_pc
+fetch_pc_hold:	A captured version of fetch_pc used as input to I$ in subsequent cycles if mem_stalled.
+		Captured from fetch_pc, but needs to be done the cycle going into a stall (i.e. first cycle fetching after a pause, newpc, or successful fetch)
+new_pc:  	Transient signal/value inputs from other stages, valid for one cycle only, to send new branch/exception destination.
+instruction_pc:	When a valid instruction or fault is output, its corresponding PC is sent down the pipe with it.
+
+0.	The cache module requires that its inputs are held stable when mem_stalled is 1.  This is achieved by fetching from fetch_pc but, in a cycle where the cache outputs non-stall-non-valid, latching fetch_pc to fetch_pc_hold.  The inputs to the cache are then muxed from fetch_pc to fetch_pc_hold when stalled in the subsequent cycles.
+
+1. 	There are two new_pc sources, WB and MEM.  WB always takes priority.  (We could get two new_pcs simultaneously, e.g. with a faulting mem op followed by branch.  WB raises exception in the same cycle as the branch asserts new_pc from MEM.)  It is structurally not possible to receive two successive new_pcs, so we don't hit the case where new_pc is accepted by IF then later "updated" with a new-new_pc e.g. while IF stalls on the first one.
+
+2.	When new_pc is presented valid, normally it is used as the fetch address.  But, it might arrive when mem_stalled due to an earlier fetch:
+	- Since the I$ is now working off fetch_pc_hold (because mem_stalled=1), we can change current_pc.
+	- Simply update current_pc with new_pc.
+	- The next non-stalled cycle then just fetches from current_pc.
+	- Then, in any cycle having mem_stalled=0 & de_stalled=0 (i.e. the next non-stalled cycle), if new_pc_pending then take new_pc_hold.  Clear new_pc_pending on any non-stalled cycle.
+
+3.	A cache lookup cycle can receive a new_pc that causes non-valid output on the new address in the same cycle (stalling in the next cycle), which presents this scenario:
+	- new_pc is valid for just one cycle
+	- The input into I$ causes a miss (not valid, will stall)
+	- The input into I$ comes from new_pc and must not change during the stall!
+	- So, we need to capture new_pc somehow and maintain it.
+
+	This is also managed by capturing the fetch_pc as described in #0:  In the first cycle (no stall, fetch attempted), fetch_pc comes directly from new_pc.  In a later stall cycle, the addr input comes from fetch_pc_hold (and associated MSR).  Any cycle asserting new_pc as valid ALSO captures new_pc into current_pc.  This means that, when the miss is resolved, current_pc = fetch_pc (equal to what new_pc was when it all began), and the fetch occurs (and hits) from the earlier new_pc address.
+
+4.	A successful (non fault, valid, not stalled) fetch cycle updates current_pc = fetch_pc + 4.  (Typically non-stalled cycles fetch, unless in fault_wait.)
+
+
+Rules
+=====
+
+- Initiate fetch if not stalled, if not fault_wait.  Fetch completes same cycle unless mem_stalled.
+- Accept new pc if new_pc.  Clear fault_wait.
+
+####
+
+# Fetch or not:
+# If DE stalls, we don't initiate a new fetch (but some ongoing mem_stall or whatever is OK).
+# Note this also inhibits IRQ generation!  We also don't fetch if in FAULT state.
+# new_pc overrides this in both cases:
+ok_to_fetch = (state != FAULT && !de_stalled && !annulled) || new_pc_valid
+# (Annul: all we need to do is not initiate a new fetch, and output invalid.)
+
+# Capture fetch_pc_hold if cache/mem is about to stall us:
+if do_a_fetch && !mem_valid && !mem_stall:  # If miss cycle
+	if newpc_valid:
+		fetch_pc_hold = new_pc
+	else:
+		fetch_pc_hold = current_pc
+
+# Which PC do we fetch from? (Combinatorial assignment to fetch_pc used this cycle!)
+if mem_stall:
+	fetch_pc = fetch_pc_hold
+else if newpc_valid:
+	fetch_pc = new_pc
+else:
+	fetch_pc = current_pc
+
+
+# PC handling:
+if do_a_fetch && mem_valid && !mem_stall 	# Successful fetch
+	current_pc = fetch_pc + 4
+else if newpc_valid
+	current_pc = new_pc
+# Note the successful fetch might ALSO be a newpc cycle (which
+# just feeds into fetch_pc); in this case, pc=newpc+4.
+
+
+# Output validity:
+if !de_stalled:
+	if mem_stalled:
+		output_valid = 0
+	else:
+		if fetched:
+			state = NORMAL
+			output_pc = fetch_pc
+			output_valid = 1
+		if fault:
+			state = FAULT
+			output_valid = 1
+
+
+####
+

@@ -1,0 +1,53 @@
+External Memory Interface
+=========================
+
+
+Each of I and D has an EMI to a block that converts these into whatever the
+external system uses, such as MIC or AXI.  EMI is a simple 64-bit pipelined
+interface, with byte write strobes and size signals.
+
+Uses rising clock edge only.
+
+Signals:
+
+Name		Size	Direction (from CPU)
+address		31:0	output
+rdata		63:0	output
+wdata		63:0	input
+BWS		7:0	output
+size		1:0	output
+RnW		1	output
+req		1	output
+valid		1	input
+
+
+Request format:
+
+An address, RnW direction, size and data.  size is:
+00: 8 bits
+01: 16 bits
+10: 32 bits
+11: Cache line (4 beats of 8, 32 bytes)
+
+For all transfers, the requester is expected to shuffle data around.  Effectively, one beat is always 64 bits, meaning address[2:0] indicates the lowest valid byte in rdata/wdata, and BWS are set to match.  (No support for anything ohter than contiguous sizes of 1/2/4/32B.)
+
+Typically for memory accesses, 2:0 can be ignored and BWS used directly.
+
+For CL transfer, address of first 64-bit dword is presented (typically address[4:0] = 0!).  Address is not required to be incremented by requestor.  (EMI responder counts beats, so can deliver pipelined 4 reads in 5 cycles best case.)
+
+
+Protocol/handshake:
+
+Start with req=1 after an edge.  If at a subsequent edge valid=1, write data has been captured or read data will become valid at/after that edge.
+
+Writes:
+- when valid=1, data was accepted
+- Valid at an edge means "got that one, give me next beat"
+- 4-beat CL write is submitted in cycle 0, and if ready, beat 1 in cycle 1, if ready beat 2 in cycle 2, etc.
+
+Reads:
+- Data is returned in the cycle in which valid=1
+-- If ready=0, requester waits.
+- Multi-beat read is presented in cycle 1,2,3,4 (or stretched if ready=0 in any of those cycles).
+
+There must be >= 1 cycle with valid=0 between requests.

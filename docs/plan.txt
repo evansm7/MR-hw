@@ -1,0 +1,287 @@
+The MattRISC project
+====================
+
+
+This is a "from scratch" (sans refining copper) SoC w/ PPC32 CPU.
+
+The CPU is going to be most of the work and will be done in stages:
+
+Define 'final set' of instructions, and arch for PAL mode; e.g. might not do string ops natively but in PALcode.
+
+
+Iterative work-- start simpler!
+
+CPU 0:
+- 5-stage pipeline, very very in-order
+- Trivial inferred IRAM and DRAM blocks, fully harvard address spaces
+- No caches or TLBs, no BATs/MMU/segment registers
+- Implement all usermode and kernel instructions except:
+-- CMOs
+-- TLBIs
+-- SPRs relating to MMU (which doesn't exist)
+- No optimisations:
+-- No branch prediction
+-- Multi-cycle multiply, slow-but-correct division.
+-- No register forwarding -- simple scoreboard/stall for operand in DE
+-- Functional rlwimi/rlwinm/rlwnm but could be slow
+- Support IRQ and DEC
+- Support TWI etc. (exceptions from EX)
+- Since no MMU, no I/D faults. (But prepare/design for these.)
+- Multi-cycle EX operations stall IF/DE and also MEM/WB (as when we do simple forwarding, it'll make that easier).
+
+CPU 1:
+- Add caches/proper memory system, for bigger test programs
+- Add CMOs
+
+CPU 2:
+- Add MMUs, I/D TLBs
+- I/D faults and exceptions thereof
+- Should be functionally complete
+- If able to run Linux, then significant test code/coverage possible
+
+CPU 3:
+- Add forwarding paths from EX-EX, MEM-EX for GPRs and CR
+- Add some form of branch prediction
+
+
+================================================================================
+CPU 0:
+================================================================================
+
+   +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
+   | IF            |   | DE            |   | EX            |   | MEM           |   | WB            |
+   |               |   |               |   |               |   |               |   |               |
+   |               |   |               |   |               |   |               |   |               |
+   |               |   |               |   |               |   |               |   |               |
+   |               |   |               |   |               |   |               |   |               |
+   |               |   |               |   |               |   |               |   |               |
+   +---------------+   +---------------+   +---------------+   +---------------+   +---------------+
+
+
+Overall notes:
+
+PC is carried down pipe w/ instruction; PC stored in IF, written in WB?
+MSR in IF too?
+
+Pipeline has stall signal forward from IF, back/forward from EX, and back/forward from MEM.  (In a given cycle, IF might miss I$, so DE doesn't decode new instrs but others should still complete;  EX might take >1 cycle and want to stall DE/not accept new op, and not emit op through to MEM/WB;  MEM might stall so does not want to accept new op nor generate result to WB;  WB doesn't stall.)  Simplest way to do this is a global 'stall', meaning a stage doesn't accept or emit a value (but could be working internally).
+
+(Stalls propagate leftward-- a stage with stall in from right is being told to hold tight & not change; it propagates stall immediately left to stop inputs from changing and so that the later instruction isn't dropped.  Stalls are not propagated rightward; a stall in, say, IF doesn't present a new instr to DE, but permits DE's instruction to propagate onwards.)
+
+
+The only state changes are:
+- the WB stage (GPRs, CRs, MSRs, PC)
+- MEM for a store (CMOs, TLBIs)
+- IF for PC++
+
+All regs stored in DE.  CR fields are separate regs; an mfcr, mcrf etc. amalgamate?  Actually, prob not worth storing/scoreboarding CR fields separately, just treat as 32b reg now.  Any instr that writes cr also reads it and splices into correct field, in EXE.  More wires/storage/read/writes but simpler.
+
+DEC/TB live in DE; DEC IRQ flagged same way as external IRQ.  The IRQ is level-sensitive based on the MSB (and of course & EE).
+
+Branch condition can (for simple branches) be resolved in DE (just read CR), but where it's a decrement/test on CTR or whatever, that should occur in EXE.
+
+Exception generation:
+- For a MEM fault, flags fault to WB (supplying SRR1 values to WB).  At this point, IF just fetched PC+12, DE is decoding PC+8, EX is executing PC+4;
+  The fault flag does the following:
+  - Writes SRR0/1
+  - Inits counter to WB:  this throws away result from 3x instrs (in EX, DE and IF).  Instrs drain with no effect (including 'exception' instr, see below).
+  - [OPTIMISATION]  Asserts signal to previous stages to inhibit activity there; make EX hurry up (don't DO a full divide or whatever), DE could avoid locking regs, IF doesn't fetch
+  - Finally, after shadow instrs drain, all regs unlocked and PC=exception vector
+  - NOTE: a store after a faulting store should not succeed; MEM also needs a counter?
+
+- For a TW/TWI, trap's evaluated in EXE and passed forward as a result, through MEM, to WB and execption flagged as above.
+
+- For an ifetch fault, IRQ or DEC, a special 'exception' instruction is stuffed from IF (possibly by outputting a flag into DE, if the main 32bit output is from a BRAM output register).  IF then stops fetching until WB sets PC=exception vector.  This instruction flows forwards, behaves as a NOP until it hits WB.  Now, if an earlier TWI or load/store causes an exception, that one reaches WB first and the pipeline drained*; that effectively annuls the 'exception' instruction.  In the case of an ifetch abort, no worries, we'll see it when we return.  For an IRQ/DEC, the act of WB raising the exception must re-invigorate the evaluation of IRQ/DEC inputs; as the MSR is updated to mask IRQs, that doesn't lead to it being re-stuffed right now but means in future it won't just get dropped.  Lost IRQs are tragic.
+Note an earlier branch might be committed after IF has experienced a fault (for example, a branch at the end of a mapped page), so a committed branch also 'resets' IF out of fault state.
+This can be done in a hacky way by checking whether the exception invoked is that of EE/decr -- if so, go with it.  If not, re-arm/re-evaluate.
+[*: pipeline drained using the mechanism above, w/ counter]
+
+- For a DE fault (unknown instruction, sc, privileged instruction/SPR etc.), pass forward 'exception' instruction as above.  (DE doesn't NEED to change state, DE can still decode instrs in the shadow of a bad instr, but might be better if it didn't.  The worst case is a store after a bad instr, where MEM contains a store and WB's fault needs to very quickly annul that store before it changes anything.  When WB contains a fault, a signal goes backwards to previous stages, resetting them & annulling any state changes.)
+-- It might pay to optimise this by causing DE to enter a halted state (exits when annulled, as IF will be initialised to newPC.  This means the fault can't be slowed down by e.g. multicycle EX activity...
+-- Remember a dynamic decode failure and an SC look the same.
+
+Branches are detected in DE; destination detected as follows:
+- Static destination can be calculated in DE with an adder (w/ PC passed forwards)
+- Register destination (lr, ctr) known at end of DE
+- Condition known at end of EX (post-dec ctr == 0, or some eval of CRn)
+To start simple (don't try to optimise away as much of branch shadow as poss YET), do the following:
+1. Continue IF from PC+4, PC+8 etc.  Don't worry about IFetch faults, they're done with 'exception' instruction. (Remember to 'unblock' in WB, in case a fault did happen.)
+2. Commit branch in WB, meaning it writes to PC (and possibly CTR)
+3. Is it simpler to be terrible for both T/NT branches?  I.e. whether taken or not, branch writes PC+4 or real dest and then annuls 3 later instructions in the pipe.  Later, *permit* these shadow instrs to succeed unharmed -- this is a static "predict not taken", so if at end of EXE the branch says not-taken, X Y Z are OK to execute.  Might just be easier to do this from the start.
+  IF DE EX ME WB
+  BR              ;; IF outputs BR instr
+  X  BR           ;; DE outputs BR as IF outputs [PC+4]
+  Y  X  BR        ;; condition decided
+  Z  Y  X  BR     ;; Output of MEM causes WB/IF to take as new PC for next fetch
+  d  Z  Y  X  BR  ;; Fetch occured from d, d is output from IF, and BR complete.  Must destroy Z,Y,X (and prevent X from changing mem!)
+
+4. So, if taken (decided in EX) then latched output of EX should flag a value that causes IF and DE to mark Y/X as 'annuled'/NOP.  Hrm, when MEM is outputing a new dest to IF/WB, this causes DE to interpret IF's current output as 'annuled'/NOP.
+
+Pipeline stages where permanent changes occur:
+- ME (stores, cache ops)
+- WB (register writes, IF/PC)
+
+OK, I think that works, nice!
+
+Later:  Two steps for prediction; simple T/NT prediction so decide that in DE, cause IF to fetch at new dest from advice from DE.  (only X in shadow.)  If at EX prediction was wrong, EX needs to reset IF somehow to real dest and annul thing in DE.  Second, could use BTB and IF could spontaneously start fetching from new predicted address.
+
+Faults summary:
+- IF:  ISI leads to fault being sent down p'line; halts until newPC.
+- DE:  Program/illegal etc. = fault sent down p'line; could halt until annul, or could continue to decode (less optimal)
+- EXE:  None
+- MEM:  DSI = fault given to WB
+Then, WB consumes fault and does the following:
+- Annuls all previous stages (kills outstanding instructions)
+- Unlocks all reg locks (no outstanding instructions)
+- Asserts newPC/newMSR into IF, which begins fetching
+-- IF, DE, if halted now un-halt.
+
+
+Other instructions with shadow:
+- ptesync (flushes TLB ops which have action in ME, even tho might affect IF ITLB)
+- isync (and sync?);  icbi can occur in ME and an isync's required to observe changes.
+- mtmsr changes must be visible directly after:  (might change IR/DR) TBD:  mtmsr should flush in-flight instrs in its shadow, e.g. instr after should observe DR value.
+Detect all of these in DE; could flag that IF should throw away/refetch current instr, and basically stop (as though IF fault) until WB commits.
+===>  Needs mechanism to stop IF, from DE, until a prior instr reaches WB/commit.
+====>  These instrs look like a branch.
+
+Each stage has latch on *output* (stemming from CPU1+ using BRAMs for caches, so read data is latched by BRAM and we do NOT want to follow that by another FF).  Forwarding from EX and MEM take this post-latched value.
+
+
+Per-instruction notes:
+
+D$ will be BRAMs, with async TLB and tag lookup (somehow) from FFs in 1/2 cycle before.  The BRAMs are synchronous, latching final output address.  That means the latch at the end of MEM isn't always the load value -- remember SXT/bswap!  So this would need to be done in WB (technically) time-wise, or at least done logically after the BRAM latch.  Remember to forward from /this/ point (final result).
+
+lmw/stmw can be implemented fairly easily with a state machine in DE:  stuff ld32/st32 for N regs down pipe (with same PC).  This would be an example of DE stalling IF whilst the rest of the pipe isn't stalled.  Bonus points:  with 2 write ports on reg file, could load/store 64 bits at once!
+- Are there any instrs that write 2 registers that are *not* loads?  (DIV/MUL?)
+- If not, need just one result FF plus MEM/D$ result latch in BRAM
+
+
+Branches:
+
+RFI:
+
+
+Future:
+- 64-bit path to L1D, for faster LMW/STMW
+- FP double load/stores (not single), FP registers and FP-to-int transfers for more efficient FPE?
+
+
+============================== Stage IF ==============================
+Stall in:	DE
+Stall out to DE:	If I$ miss, if in IF_fault state
+
+(Could also generate NOPs when in fault state, instead of stall out)
+
+State machine:	IF_active, IF_fault_generate, IF_fault
+
+*IF_active:
+Do nothing if stall in
+
+if !load_pc
+    Read inst32 from [pc]
+    if (!fault)
+        Increment [pc]
+    else
+        IF_fault_generate
+else
+    pc = new_pc (and stall out -- no new inst for DE yet!)
+
+*IF_fault:
+Do nothing if stall in
+
+if_fault = 1
+IF_fault	// Pulsed for 1 cycle
+;; this makes output a fault token, but only one of them.
+
+;; Need mechanism for DE to push IF into IF_fault
+
+Outputs:
+{inst32, pc, if_fault}
+
+Inputs:
+{new_pc, load_pc}
+
+============================== Stage DE ==============================
+Stall in:	IF, EX
+Stall out to IF:	If EX stall in or self_stall
+Stall out to EX:	If self_stall or DE_empty (becomes empty if no stall in from EX, i.e. instr moves, yet stall in from IF)
+
+Pipeline stage options, for IF stall and EX stall:
+
+IF  DE  EX
+ok  1   ok	inst 1 moves to EX, loads inst2 in same cycle
+s   2   ok	inst 2 moves to EX, DE becomes EMPTY
+--  3   s	inst 3 stays; stage stalled.  stall OUT asserted to IF (so IF stalled), so no inputs changed either.
+
+self_stall: might backpressure to IF for multi-cycle ops, or to both IF and EX if instruction cannot progress because of *locked operand registers*.  (In our pre-forwarding world, or for a value that can't be forwarded.)
+
+May want logic after reg read, and many read ports; do regs in FFs (not BRAM)
+
+State machine:
+- Usually single cycle operation, DE_normal -> DE_normal
+- DE_empty if contents consumed w/o refill (no valid output)
+
+Multi-cycle ops:
+- Any op that reads more than nr read ports (2?) operands, e.g. stwux (base, offset, value)
+- stmw, ldmw multi-cycle ops are special and cracked into separate ldw/stw instructions (to EX/MEM/WB they are indistinguishable but all have same PC)
+
+When new instruction to be latched (i.e. my stall out to IF = false):
+- Decode into control sigs for ALU, muxes
+-- Look for static faults:
+--- Regular Exceptions e.g. SC or PALcode trap
+--- Privilege, e.g. mtmsr in userspace
+--- UNDEF
+-- Note DE doesn't need a 'faulting' state, because no state changes are possible until WB, and a later store will be annulled by WB.
+- Decode reg A & B params
+- Assert stall if A or B are locked
+- Else, read from register file & enable stage output latches
+- Lock output register
+
+
+============================== Stage EX ==============================
+Stall in:	DE, MEM
+Stall out to DE:	If MEM stall in or if busy
+Stall out to MEM:	If DE stall in and current instr complete, or if busy
+
+Busy if multi-cycle op FSM isn't done yet
+(Early termination for divide etc.?)
+
+Easy: +,-,logicals
+Medium: shifts, mul (do shifts using mul?)
+Harder: div/rlw*
+(rotate = yuck on FPGA/LUTs)
+
+Can raise exceptions:
+- TW/TWI
+
+Outputs:
+GPR or CRx, fault/instr
+
+============================== Stage MEM =============================
+Stall in:	EX
+Stall out to EX:	If busy
+Stall out to WB:	If EX stall in and current instr complete, or if busy
+
+Busy if D$ or DTLB miss being resolved (incl non-cached mem access), CMO, TLB op
+
+Go into exception state when flagging a memory fault to WB?  This means younger
+stores can't change memory state.  This state is exited when WB signals the
+exception.  (NO:  Don't need this -- WB_annul will stop MEM!)
+
+(Do second half of MUL or complex shifts here, fully-pipelined?  Figure this out
+in conjunction with forwarding, they'll mess each other up.)
+
+============================== Stage WB ==============================
+Stall in:	MEM
+Stall out:	none
+
+
+Countdown timer to consume instructions in shadow of MEM exception:  careful to only count real instrs, never stalled cycles.
+Careful to unlock output regs of instrs in shadows.
+WB writes register values to regs held in DE
+Also writes unlock information to scoreboard in DE
+Also writes PC to IF
+
+======================================================================
+
+--------------------------------------------------------------------------------

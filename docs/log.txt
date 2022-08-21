@@ -1,0 +1,2052 @@
+Dear reader,
+
+Reading this will be a little like you're reading my diary.  This is
+an unedited project notebook with typos, raw debugging notes,
+ideas/wishes, gripes and tribulations.  There are notes/designs in my
+paper book but this charts history and progress most accurately.  See
+the end for a ToDo list.  Much of this is a "top-level" MR-sys project
+log, rather than solely CPU-specific work.
+
+You might see some good engineering in here, but you're likely to also
+see some sloppy behaviour; remember it's all just for fun.  :-)
+
+Yours,
+
+Matt Evans, 22 Jan 2021
+
+--------------------------------------------------------------------------------
+
+----
+14 Mar 2020:
+
+Been working on it for a couple of weeks, now it's looking pretty good:
+
+- Doesnm't do ANY mem ops, but:
+- branches work, conditions correct,
+- ALU ops complete (no MUL/DIV/shifts/cntlz)
+- Exceptions work
+
+Next up:  it gets to test_ldst_basic correctly, so implement loads/stores now.
+
+
+----
+17 Mar 2020:
+
+Did that;  loads and stores working.
+
+
+----
+18 Mar 2020:
+
+Now, do multiply.  That is, multi-cycle EXE ops.
+
+Done multiply -- TODO, MUL should really be fully-pipelined, so NOT stalling EXE and giving its result in MEM.
+However, for now, it's more useful to try out stalling of MEM!
+
+(Then lmw/stmw)
+
+
+----
+22 Mar 2020:
+
+Implementing LMW/STMW, generally clean but some autogen ranges to synthesise an instruction.
+
+Side diversion, wrote mk_harness.py and test-synth for trial implementation to get timing.  (Sure enough, multiplier is critical -- pipeline this or simply delay for +1 cycle and pipeline internally in execute_mul.)
+
+
+----
+23 Mar 2020:
+
+Runs all of testprog.S correctly!  LMW/STMW working.
+Do shifts/masks next, and condition calcs.  Then it's time to try C!
+
+
+----
+24 Mar 2020:
+
+Implemented CR bit ops, all CR-mangling exe_rc_op stuff.  Lots of untested stuff but complete.
+
+I want to run C.  Do shifts, cntlz and some kind of (behavioural?) divide implementation!
+
+
+----
+29 Mar 2020:
+
+Now running C, ppc_tests test program.  Built using dietlibc, linked to 0x11000, the binary
+is concatenated onto mos.bin at 0x10000.  (MOS contains start address, TBD to patch this in
+automatically from an ELF -- write a script.)
+
+Running unmodified simple_random tests:
+- twi traps to 700, but that changes regs before it finishes, so final diff is wrong;
+  restore all regs first!
+
+- Divide should work
+
+
+----
+30 Mar 2020:
+
+- Verilator running (faster by about 25x!)
+- Passing ppc_tests, gfx_tests in MR-ISS, MR-hw (iverilog/verilator)
+
+Beware of uninitialised memory, dietlibc assumes BSS was cleared!  So pad memory image with 0.
+
+Going pretty well!
+
+
+----
+26 May 2020:
+
+A delay, then work on cache, then rewrite of IFetch stage to cope with cache/delays.
+Seems to be working well (with just I$ in place), passes random tests (size 8K, seeds
+0 up to 205000) with no failures.
+
+Next step, add D-cache.
+Weird failures:
+Basic tests work, gfxtest is very shonky output-wise.
+Seed 0 size 8K fails.
+107, 108, 109, 110 fail.
+
+For 0: error in IFetch, which dropped cache read strobe too early (due to DE stall due to MEM stall on a miss).
+Fixed that and gfxtest now WORKS.  Repeating soak test for 200K seeds:
+
+
+----
+28 May 2020:
+
+Cleaned up MIC stuff in mic-hw repo yesterday.  Today, designed & implemented an EMI
+to MIC bridge (& drew lovely wavedrom diagrams).  First test, using MIC BRAM, works!
+Runs testprog OK.  Passes gfxtests!  YASSSSS.
+
+----
+2 Jun 2020:
+
+Sometime this week got demo0 on ac701 and ltxc5!
+
+
+----
+5 Jun 2020:
+
+After tons of dicking about w/ 14.7 & it failing to infer RAM that's actually writable), got it running on ltxc5, with demo0 in console output.  Today got framebuffer running!  (bad RAM, led to 4K in LUTs - now fixed it 6th June.  Plasma demo on plasma panel!)
+
+
+----
+8 Jun 2020:
+
+Done CMOs.  Still need to wire up to instructions.
+
+What's next big step?  SSRAM and loading various programs (e.g. via uboot/serial download).
+SSRAM will make BATs/MMU more interesting.
+IRQs?
+Keyboard and terminal will be fun; likely want at least BATs to set FB as UC/WC.
+
+
+----
+14 Jun 2020:
+
+Rebuilt mr_top into "MR3" platform with IO in the right places, and built MR-ISS models of GPIO etc.
+Working in firmware/ dir, with basic firmware in high 1MB of address space (vectors high), SSRAM
+in bottom.
+Interconnect keeps SSRAM path short, then a 1:2 IC to split between IO and boot memory access.
+Bit of a mare getting SSRAM models; the CY1471 model was ancient verilog & didn't work with iverilog v99 or
+Verilator.
+models/ directory is NOT in git and contains hacks:  fixes to FDRE (= vs <=, async reset) and IODELAY
+(same).  G8640Z36T.v has some timing stuff taken out for Verilator.
+
+Now it runs OK!  Simple RAM test in firmware runs in iv/verilator, same as MR-ISS.  Time to try on
+real hardware.
+
+Firmware:
+Have used the litex serial boot protocol (and simple download code) to transfer over serial.  Works great
+in MR-ISS + litex_term.  Will make development on FPGA more flexible - download larger programs
+from host.
+
+
+----
+15 Jun 2020:
+
+I got bitten by alignment.  I don't yet fault on unaligned ops and it was sure to bite me sooner or later...
+The lx serial load code uses a packed struct of header bytes.  CRC is a 16-bit amount in 2 bytes.  Compiler
+cleverly sees crch at offset 1 and crcl at offset 2 and folds the "crc = (h << 8) | l" into a 16-bit BE load.
+Unaligned (offset +1).  Sigh.
+
+Fixed in the code for now, but MUST DETECT THESE.  Significant difference between ISS and hardware!
+
+In other news, implemented serial line stuffing into verilator (to find this).
+
+My cache invalidation changes totally fucked synthesis.  Build hangs/BIG builds for two reasons:
+typo doing a {BLAH{1'b1}} repeat where BLAH was 1<<26 or so.  Um. big vector.
+The other is cache INV_ALL:  commented out.  The write of tag_mem[internal_counter] seems to bother things.
+I think it'd work assigning a different signal, so always writing to tag_mem[tag_offset] and elsewhere
+generate tag_offset depending on the state.  FIXME.
+
+--> Fixed these and momentous moment #2:
+- Running at 48MHz, with 16MB external SSRAM
+- Downloading via console works
+- mem_test seems to work (though gets a weird exception half way.  Oh, no.  it jumps through zero when it finishes.)
+
+YAY!  Fails PAR timing constraints at 72MHz, *but* works to run bootloader, downloads mem_test and completes that fine @72.
+--> see which bits are failing...
+
+
+----
+6 Jul 2020:
+
+Implemented ICBI, all D CMOs and IC/DC INV_SET for invalidate-all, and all test OK.
+Can now implement simple_random on FPGA.
+
+However, there's now a new channel from MEM to IF for making IC CMO requests.
+
+Verilator points out that:
+
+Signal unoptimizable: Feedback to clock or circular logic: 'tb_top.TMCT.CPU.IF.ITC.ICACHE.valid_out'
+   reg           valid_out;  
+                 ^~~~~~~~~
+                    src//itlb_icache.v:230: ... note: In file included from itlb_icache.v
+                    src//ifetch.v:390: ... note: In file included from ifetch.v
+                    src//mr_cpu_top.v:76: ... note: In file included from mr_cpu_top.v
+                    tb//tb_mr_cpu_top.v:173: ... note: In file included from tb_mr_cpu_top.v
+                    tb/wrapper_top.v:17: ... note: In file included from wrapper_top.v
+		    
+                    src//cache.v:124:      Example path: tb_top.TMCT.CPU.IF.ITC.ICACHE.valid_out
+                    src//itlb_icache.v:201:      Example path: ALWAYS
+                    src//itlb_icache.v:61:      Example path: tb_top.TMCT.CPU.IF.ITC.cache_other_valid
+                    src//dtlb_dcache.v:242:      Example path: ALWAYS
+                    src//dtlb_dcache.v:82:      Example path: tb_top.TMCT.CPU.MEM.DTC.hit_r
+                    src//memory.v:224:      Example path: ALWAYS
+                    src//memory.v:84:      Example path: tb_top.TMCT.CPU.MEM.mem_stalled
+                    src//execute.v:534:      Example path: ASSIGNW
+                    src//mr_cpu_top.v:38:      Example path: tb_top.TMCT.CPU.execute_stall
+                    src//decode.v:951:      Example path: ASSIGNW
+                    src//mr_cpu_top.v:37:      Example path: tb_top.TMCT.CPU.decode_stall
+                    src//ifetch.v:125:      Example path: ALWAYS
+                    src//ifetch.v:121:      Example path: tb_top.TMCT.CPU.IF.cache_read_strobe
+                    src//itlb_icache.v:66:      Example path: ALWAYS
+                    src//itlb_icache.v:56:      Example path: tb_top.TMCT.CPU.IF.ITC.cache_read_strobe
+                    src//itlb_icache.v:201:      Example path: ALWAYS
+                    src//itlb_icache.v:162:      Example path: tb_top.TMCT.CPU.IF.ITC.cache_request
+                    src//cache.v:862:      Example path: ALWAYS
+                    src//cache.v:124:      Example path: tb_top.TMCT.CPU.IF.ITC.ICACHE.valid_out
+
+
+MEM waits for ack on its inval request channel, which is derived in part from cache hit (valid_out depends on that).
+hit depends on enable, which might be given by request channel.
+Stall depends on that ack.
+Ifetch doesn't make a request if stalling.
+- Verilator thinks then that the ack will never happen.
+
+This is a false path:
+- cache_other_valid is in response to cache_other_strobe and doesn't depend on cache_read_valid ever going to 1
+
+
+31 30 29 28 27 26
+                  25 24 23 22 21
+		                 20 19 18 17 16
+
+
+----
+20 Jul 2020:
+Planning external debug agent
+
+Would make sense to use the litex WishboneStreamingBridge protocol.  Simple, transfers 32b words.
+Could be clever and format these into a burst, or start simple and just do a single access per word, since the USB/whatever will be the slowest part.
+Build proper FT245H interface too?
+Make a generic AXI-STREAM-like interface to the "byte source" (UART or FT245H).
+
+Internal APB regs: drive reset for CPU.  Collect counters?
+
+
+----
+7 Sep 2020:
+MMU work
+
+Continuing MMU work (started ~20 Aug).  Decided that:
+- MMU unit lives in DTC/ITC and receives BATs as wire bundle from DE.
+- MMU unit TLB requests external PTW unit on miss
+- PTW unit has a R port to DTC/D$ (DONE).
+- MMU unit TLB caches EA-PA, i.e. contains SR information
+- SRs go to PTW unit.
+- Change in SR needs to invalidate-all TLBs -- change decode to add an INVALL to those MSRs!
+- DTC needs to post an INV to ITC and do a local invalidate for TLBI.
+- Implement TLBI for I and D
+
+First, get BATs working:
+
+
+----
+13 Sep 2020:
+
+- Ifetch cacheable access depends on MMU valid which depends on MMU translation_en (which depends on fetch)
+- may need to capture this; it's used to do a cache access ... it's not held constant and some fetches (e.g. 400 handler) happen non-cached WTF?
+
+And then, 4318 reads as X.  That line's been fetched before but might be that it's not been written correctly due to the above.
+
+problem 1:  fetch of addr 400 goes non-cacheable (?? IO segment stuff doesn't work?) -- fixed, was a typo
+Fixed that but 4318's not an X anymore, wat!
+
+
+----
+4 Oct 2020:
+
+Previous session completed IBAT/DBAT stuff which appears to work.  Now working on TLBs.
+
+Thinking on two issues.  First, the combinatorial loop from MEM to IF:  aside from confusing optimisers, it requires having the ITC "close" to the MEM stuff which will reduce fmax.  Trying to be too clever/fast.  What would be better is a registered req/ack interface:
+- MEM issues REQ packet (IC inval, TLB inval) which sets mem_req (and registers mem_inval_type?)
+- ITC, on a given cycle, acts on mem_inval_type etc., then sets mem_ack (registered?)
+The 4-phaseness is irritating & would involve another cycle to drop mem_req, then drop mem_ack.  If this becomes a problem (back-to-back invalidates, likely icbi?) then use a 2-phase HS, 00/01/11, 11/10/00.
+
+Second, resolving that will be important to make TLBIs sane (e.g. in one cycle send req to ITC and DTLB, exit that state when DTLB is complete && ITC handshake complete).
+
+Should I just do the 603-style MMU to start with?  It might provide some motivating "run Linux sooner" feels.
+- 0x1000/0x1100/0x1200 handlers
+- IMISS/DMISS regs (EA)
+- ICMP/DCMP (formatted first word of hash entry)
+- HASH1/HASH2 (HTAB addresses)
+- RPA + tlbli/tlbld (loaded word insert into TLB)
+?
+Not sure -- now that I've already created a D$ port for PTW access, creating these exceptions & paths for tlbli/tlbld to poke in TLB entries (presumably via mem_req channel etc.) seems more complex.  Doesn't avoid segreg annoying lookup either.
+
+-> Continue as plan A.
+
+Still not sure how to perform the TLBI all required on an SR change.  Doing that in MEM (as the SR write passes) is too early because the SR hasn't been updated by that point.  Alternatively, store SRs *in* MEM and perform an update at the same time as the ITLBI/DTLBI (so that, upon completion of the invalidate, any refill will see new value).
+
+
+----
+5 Oct 2020:
+
+I've misremembered how the MMU works; tlbie (in pem32) hits *effective* addresses based on EA[27:12], i.e. in all segments/regardless of segment (given by EA[31:28]).  Note MR-ISS implements tlbie as tlbia (lazy me!) so I didn't see any problem.
+These bits are the same in EA/VA though, so TLB is still considered a VA->PA cache (not EA).
+
+I'm *still* second-guessing whether the (first, critical) TLB contains EA-PA (thus embedding SR info, so requiring invalidation when SRs change) or whether to look up SRs inline and cache VAs in TLB.  The latter may work better if I move TLB lookup to EXE.  TLB lookup critical path would be extended by a 16-1 mux (2 CLBs?).
+
+[Test implementation:  adding BATs adds 10% to critical path already!  (I expect TLB to be something similar, in parallel.)  Now 14ns for MEM :(  Note it's hard to do IF with two cycles unless a new_pc has an increased penalty, i.e. true two-stage IF.]
+
+Note!  PPC750 *also* treats tlbie as a 6-bit index from EA[17:12], same as 604.  Fucking hell!  For a fully-assoc TLB this is OK but would probably lead to large over-invalidation.  On the plus side, this makes it compatible w/ software assuming a TLBIA is equivalent to 64x TLBIEs (not all ancient stuff implements TLBIA, even MPC750).
+
+
+----
+15 Oct 2020:
+
+- Fix tlbi addressing (over-inval is OK) - DONE
+- implement refill FSM (and dummy PTW box, perhaps using SRs?) - DONE
+
+- SRs in MEM
+
+- implement inval request channel to ITC (using captured edges to break the combinatorial loop);  icbi EA->PA translation occurs first (in DTC) and request takes PA, otherwise TLBI goes MEM->DTC->ITC and DTC-internal.
+NOTE: must sink a TLBI even if a PTW is ongoing
+- Implement TLB invalidations
+- SR changes - invalidation for I/DTLB
+
+
+Q: How does NX work?  Does it have to be distinguished from a TF?  How?
+
+
+----
+23 Oct 2020:
+Thoughts on forwarding paths:
+
+Actually quite simple if all bypass is from EX out and MEM out back to DE.  No
+bypass from MEM to EXE/mem input.  Pass with each instruction which register it
+produces/writes to (present in wb_reg_port_0 I guess, but add a flag showing
+that's the ONLY result).  So 2 routes from ex_r0 and mem_r0 (see later) back to
+DE.  The stall calculation in DE is reg_a_locked || reg_b_locked ||
+reg_c_locked, but now it's (reg_a_locked & !(exe_fwd_yes && (exe_fwd_reg ==
+reg_a))) etc.; then, DE's op_a has another mux option, i.e. op_a <= exe_fwd_val
+or mem_fwd_val depending on whether mem_fwd_reg matches (or if not, exe_fwd_reg,
+in that order).  Locking then stays the same, nice and simple.
+
+PMU:  Count on: stalled in DE (operands); TLB misses, cycles stalled for memory.  Export via APB (so can be read via USB debug pipe, charted on host).
+
+
+----
+8 Nov 2020
+
+Implemented r_debug, with tests - seems OK.  note there was a bug corrupting a 1-beat read from s_bram,
+whose fix hopefulyl doesn't screw anyhting else.
+
+Going back to MR-sys:  nothing works. There seems to be two problems:
+- iverilog builds take a fault 3 on IF from reset fff00100 right away
+- verilator works but only on CPU before a55f4b25f86b955d5cca43c70fdfe71de4e1985a (add BATs)
+Works = runs bl-512.hex (only thing linked to mr3's high boot memory anymore).
+Gross.  Debug that faultiness then...
+OK that was a bug in bram (addr needs masking, it was an X-fest).
+But now... with top of MR-hw it still doesn't run the firmware properly; console output is some weird:
+"****BBoo****oigAT "
+Note chars doubled. The log from DEBUG=1 appears very strange, e.g. mis-decoded instructions.
+(at least iverilog and verilator are now the same - X)
+
+
+----
+15 Nov 2020
+
+Debugging that grossness:  using:
+MR-sys at 4345240b6f8d39032a9e2b43ee62b89a6bd39e67 (Jun 15)
+MR-hw at 2ca2429acd7e74ea0fd0b1794cc133ca698cbd27 (Jul 19)
+mic-hw at 5d5e25e471b793e8d069d2ac1e4613fec1b8d25e (Aug 10)
+
+output works:
+*** Booting (UART) ***
+
+Bootloader version 0.1, built 19:28:29 15/06/20
+GPIO inputs: 80000000
+- Running in sim
+
+LCDC regs:
+        ID = 0x44431
+        FB_BASE = 0x0
+        XPOS = 348, YPOS = 16
+        WIDTH = 640, XMUL = 1, HEIGHT = 480, YMUL = 1
+        -ve VSYNC, width = 3, front porch = 1, back porch = 26
+        -ve HSYNC, width = 64, front porch = 16, back porch = 120
+        WPL = 39, BPPlog2 = 3
+RAM at 0x0: bacecace 
+RAM OK
+
+Note; same versions of CPU/sys and mic-hw at current tip (8cdd821324f24674868109560f7c20e4dd93fb50) gives garbled output!  Yey.
+
+Found it, it's 469c1c427a8faa69d3e997830310ae71f6aab77f (BRAM: Fix one-beat access)  :(
+--> find where a one-beat access happens! hmmph, addresses fetched are wrong.
+
+Before this (with 'working' mic-hw), try top of master on MR-hw:
+--> Works.
+
+OK, fixed that, works with top of master in MR-sys, MR-hw, mic-hw (added fix 221b94aae5429c180b8460fcceba86ec127d1179) as of today
+
+OK, from here:
+- Continue/fix TLB/fetch stuff
+- Connect console uart to socket in verilator; other tweaks like GPIO switches from cmdline option  DONE
+- Add r_debug to MR3, and plumb through to cmdline thingy to interact with verilator sim
+- *** Test implementation and ensure BRAM still works/writable... (may need to add common RdEn to write too)
+- Firmware: make cmd parser run on uart and on video console (FB, kbd input)
+- I2S module :):)
+
+Added UART IO to verilator testbench - socket still to come
+
+
+----
+29 Nov 2020:
+Been building around r_debug:  verilator/sockets interface for sim, and python for talking to it.
+
+- Works in hardware
+- Build I2S and python script:  plays music via I2S!
+
+
+----
+20thish Dec 2020:
+Got the TLBI stuff done, and simple tests for TLB refill via PTW.  Looking good.
+Thinking to test this with Linux and see how far it gets before crashing...
+
+So working on:
+- mr-uart support in boot shim	DONE
+- mr-uart driver for Linux	DONE
+- MR3 support (in sim)		DONE
+- Update to v5.10		DONE
+- IRQ controller RTL
+
+But before IRQ controller exists, decompressor and kernel startup will work.
+
+make simpleImage.initrd.mr3
+
+
+----
+23 Dec 2020:
+
+Running the simpleImage in sim:
+Several things stand out, which I had meant to do before this point...
+First, divide instructions; it's going to be painful to run the kernel without these, or self-handle.  So it's time to just go and do a divide.  Second, unaligned mem ops are causing alignment faults for e.g. stw to +2.
+
+(Added probes to MR-ISS.)  OK, booting linux/busybox, there are a bunch of unaligned reads/writes that do cross a 64b boundary.  Many more reads than writes:
+
+500M instructions:
+R16:  6428831, 110773 (1.7%) unaligned and 26886 (0.4%) crossing a CL.
+- 0.0054% of instrs is a load16 crossing a CL
+R32:  86564805, 54064 (0.06%) unaligned and 27997 (0.03%) crossing a CL
+- 0.0056% of instrs is a load32 crossing a CL
+W16:  3330370, 131 (0.0039%) unaligned and 8 (0.00024%) crossing a CL
+- 0.0000016% of instrs is a store16 crossing a CL
+W32: 75490154, 13870 (0.018%) unaligned and 6162 (0.008%) crossing a CL
+- 0.0012% of instrs is a store32 crossing a CL
+
+So.... hmmm...... 1 in ~8200 instrs is a mem op crossing a CL/taking a long time.  If I can get software emulation of this this down to 100 cycles, then that's ~2% slowdown.  Seems fairly good tradeoff.
+
+- Can kernel (once started) do its own alignment emulation?
+- Can emu cope with only cacheable memory?  (i.e. unaligned to IO - I think that's forbidden anyway.)
+- Can the kernel (and boot/decompressor in particular) be built without unaligned ops?  (I found CONFIG_HAS_EFFICIENT_UNALIGNED and made that false for MATTRISC, which reduces but does not remove them.)
+-- Ah! -mstrict-align ?
+
+
+0x600 alignment exception doesn't provide a lot of info.  IMPDEF regs can give decode syndrome (tho more Linux hax - easier in PALcode approach)
+
+-mstrict-align does not seem to strictly align:  both the decompressor and the kernel seem to use unaligneds, but the decompressor only seems to do one W32 (and within 64b).
+-> See how far we get just implementing write-unaligned-within-64b?
+
+ zImage starting: loaded at 0x00500000 (sp: 0x00835fa0)
+ Allocating 0x495870 bytes for kernel...
+ Decompressing (0x00000000 <- 0x00513000:0x007105fb)...
+ Done! Decompressed 0x47c454 bytes
+ Attached initrd image at 0x00711000-0x00834bd1
+ initrd head: 0x1f8b0800
+ 
+ Linux/PowerPC load: console=ttyMR0 earlyprintk debug root=/dev/ram
+ Finalizing device tree... flat tree at 0x8368c0
+ Emulation fail opcode 7d70faa6, PC 0000c628, exiting  [Ah, I didn’t implement SPR_HID0]
+
+- Gets into kernel, in setup_common_caches hits HID0 access.
+- Implemented HID0 (simple RAZ/WI as per MR-ISS, oops, I forgot)
+
+Decompress takes > 10 minutes though :(((  (Try M1: 5m37 yay)
+
+-> Need to write a little booter for a bare vmlinux + initrd + dtb
+In addition, switch vectors low when invoking kernel; see if it can emulate its own unaligned mem ops!  (Will need hardware divide.)
+
+
+----
+25-31st Dec 2020:
+
+Booting Linux on verilator gives garbled output:
+
+Linux/PowerPC load: console=ttyMR0 earlyprintk debug root=/dev/ram
+Finalizing device tree... flat tree at 0xdc18c0
+prinprinbootbootTotaLinuUsin----physdcacicaccpu_  po  alcpu_mmu_HashHash----mr_setup_arch()
+MR PTop MemoZone  NoMovaEarl  noInitOn n  No  No  NopcpupcpuBuilKernDentDentacheacheh tah taentrentr 204 204rd20rd20 819 8194es,4es,ear)
+...
+
+That was because alignment interrupts weren't working, meaning most likely that memcpy/memset were broken.  That figures, given the corrupted strings.  Alignment faults were raised by DTC, but ignored by MEM because DTC was also signalling a hit.  Having inhibited that, they're taken.
+
+Let's try again, having fixed raising of alignment interrupts.
+
+(See linux_log.txt)  On verilator, full dmesg but "Failed to execute /init (error -22)"
+
+Bigger issue:  the FPGA build (ltxc5) gives no output at all.
+
+Using litescope, checked TLB hit/miss stuff- was looping at 0x400; just by chance managed to capture a trace of a TLB request (before final infinite loop) for a high address.
+
+And, noticed the UART output on verilator was broken-- needed some input before it would work.  Traced this to something unforseen:
+- Not IRQs, not UART driver, not UART FIFO problem
+- Was seeing spinning/polling on an access to 0x80000000 (i,.e. not status reg at addr 4).  Odd.  That was due to the kernel using HTAB with a single mapping for UART at 0xfff..00 stuff, which didn't work:  TLB bug!  I wasn't outputing VA [11:0] :(((
+
+Having fixed that, verilator looks reasonable but:
+init[1]: segfault (11) at c nip b7d27e78 lr b7d27e10 code 1 in ld-uClibc-1.0.36.so[b7d23000+8000]
+
+Got simple_random running on FPGA, and ran:
+- 4K instr tests at seed 12345-17279
+- 1K instr tests for seeds 12345-22218
+All matched e500 hardware OK.
+
+
+
+Debugging:
+- Observed PTW for TLB miss on 0xc0003000:  there's a BAT set up for 0xc0000000!
+  So there should be *no* PTW for this!  --> IBAT isn't matching.
+
+Suspicious: BATs are inferred as 4x64 RAMs, except four DP RAMs are generated for each BAT! (all share write, and read is from a constant address, WTAF?)  Some way to force this into a real reg?
+- Read using a case statement/mux rather than [idx]
+- FFs locally within the MMU?
+
+Looking on litescope: capturing IBATs just to view the values being matched against
+AHAH.
+IBAT gets written correctly at 0x37cc (in initial_bats) and then immediately overwritten in the next cycle.  How is this possible?
+Pfft, rewrite BAT stuff.
+
+Done that -- simple "not too clever" 4x pairs of registers.  Better, look!
+
+
+NOW:  FPGA build outputs dmesg and crashes in exactly the same way! (See boot log).
+
+
+----
+3 Jan 2021:
+
+Continuing, implemented Verilated save/restore;  managed to capture a save moments before init is executed!
+- Can then start logging VCD from that point (or a short delay thereafter)
+
+init[1]: segfault (11) at 0 nip b7d29018 lr b7d28ec8 code 1 in ld-uClibc-1.0.36.so[b7d24000+8000]
+
+Got it:
+Store at b7d29018 accesses zero -- pipeline regs *look* like it should be b7d2a310, which fits....
+
+    5008:       81 5f 01 40     lwz     r10,320(r31)
+    500c:       39 20 00 00     li      r9,0
+    5010:       7f 24 cb 78     mr      r4,r25
+    5014:       7e e3 bb 78     mr      r3,r23
+    5018:       91 2a 00 00     stw     r9,0(r10)   <<<<<
+
+r31=bfdb5580, load addr = bfdb56c0, phys = 00f026c0
+
+That load is uncached -- shouldn't be!
+
+- The TLB entry was added uncached; the PTE for its walk had WIMG=0.
+- The kernel doesn't define CPU_FTR_NEED_COHERENT so M isn't set, and I misread "guarded" - I was checking for 0011 whereas should be checking for 00x0
+
+
+----
+4 Jan 2021:
+
+Fixed that, recognise 0000 as WB.  But now init just does nothing/prints nothing...
+
+cycle 517970700 is during UART driver init, quite near mounting root
+
+Captured a dump at 546546587; sim from there for +3M and tracing then shows first entry into userspace,
+a syscall 0x128, syscall 90 (getcap) and various page faults that look like they're handled OK.
+On the lookout for weird faults...
+setxattr
+timer_gettime
+getcap
+io_cancel
+getcap x 4
+lxsetattr
+capset
+delete_module
+getcap
+
+--> Build debug:
+- PC trace at WB?
+- syscall trace at WB?
+
+Suspect hashing wrong?  seems sequences of fault 12 for same page :(
+- Yes: segment_selector is derived from req_addr[31:28] and used same cycle it's set, i.e. is stale at usage time
+- This means PTWs occur with the wrong segment/VSID and miss too much (or pick up the wrong translation :( )
+
+Try again (dump won't load :( )
+- Dump capture at 540M
+
+(Triva: on MBP verilated thing is 25Mcyc/minute or 416KHz.  AMD seems similar, 26M - though not on same place.)
+
+Complete:  Committed 191710591 instructions, 348289405 stall cycles, 540000000 cycles total
+
+----
+7 Jan 2021:
+
+Previously, fixed those bugs: corrected segment_selector.  Also had a fun bug where a DSI fault is written to IF during IF doing a PTW which ends up retunring ISI, and the ISI replaced the DSI.  (Problem was missing that the PTW doesn't complete, isn't valid because fetched address had changed -- I wasn't checking valid on PTW output.)
+
+New debug feature:  MR-ISS dump state (to be imported back into verilated build).
+
+Step MR-ISS for 210000000 cycles -- just before sysctl: OK where it now hangs in sim.
+
+
+----
+9 Jan 2021
+
+General hand-over between MR-ISS and sim is OK at the bootloader/Linux entry stage, e.g. 3500000 instructions in.
+
+ISS for 183000000 instructions:
+(Ahh found it, SDR1 was read wrong in ISS)  Now I can pick it up at 183M and MR executes correctly.
+
+Now re-try with 210M:
+Sim +3M after this is *just* before the "Running sysctl: "
+
+Now log:
+
+Perms fault writing user page (TLB hit but PF)...
+fucking hell, I didn't commit the previous fix :( just debugged it again.
+
+OK looks "OK" for 3M-5M after this checkpoint.  Look 10M-12M
+
+ssf.1 is shortly before "OK" (last I see on FPGA):
+
+gtkwave: I see nice patterns when everything stops:  cache refills cease completely indicating it's stuck in a loop
+
+
+----
+11 Jan 2021
+
+Ran MR-ISS to just before the sysctl: OK thing (this was 210M above).  Import savegame into MR-ISS.
+Built checker and ran MR-ISS interpreter function (for int ops):
+
+OK
+*** c00251ec (cycle   25185100) 7d4a4878:  WB XER 00000000 CR 48022408 vs interp XER 00000000 CR 28022408
+*** c0025200 (cycle   25185126) 7d4a4878:  WB XER 00000000 CR 48022408 vs interp XER 00000000 CR 28022408
+Complete:  Committed 8220421 instructions, 17779575 stall cycles, 26000000 cycles total
+
+
+Got it.  Two andc instructions:  they were unconditionally writing back CR.  However... they weren't '.' versions!  CR wasn't read, so they were writing back a residual version.
+Found this bug by inspection in srw too.
+
+(Re-ran -- gets from T=0 to sysctl: OK with no miscompares, yay.)
+
+In sim, I get:
+ Welcome to Buildroot
+ ppcboard login:
+
+Except on FPGA, I don't...... another weird RAM inference? :(  Check TLBs...  (try TLB=1)
+
+AHHH.  I do.  Wait.  It seems to take a minute or two before printing that banner!  WHY?
+
+BUT YES it works!
+
+
+----
+25 Jan 2021
+
+Found that bug: was losing DEC interrupt in the case where a branch is annulled
+because the pulse was accepted then reset due to annul.  Async pulse is lost.
+
+Fixed this by treating DEC as level - technically incorrect but it stays pending until
+the DEC value is reset in the handler.
+
+With that....
+
+TA DA! IT WORKS AND BOOTS LINUX AND WORKS NICE AND BUSYBOX IS FUN!!!!
+I can play ascii invaders!
+ _     _                    _                 _       
+| |   (_)_ __  _   ___  __ | |__   ___   ___ | |_ ___ 
+| |   | | '_ \| | | \ \/ / | '_ \ / _ \ / _ \| __/ __|
+| |___| | | | | |_| |>  <  | |_) | (_) | (_) | |_\__ \
+|_____|_|_| |_|\__,_/_/\_\ |_.__/ \___/ \___/ \__|___/
+                                                      
+
+I got framebuffer working also.  Note 1BPP is logical "lowest bit left" order which is
+not what Linux expects (bit 7 in a byte is left).
+
+
+----
+1 Feb 2021
+
+Messing with audio, got a nice startup chime in the MR-fw. :-)  Also got
+a baremetal soundtracker working (my modplay.c player routine).
+
+
+----
+15 Feb 2021
+
+Did some implementation perf analysis.  Predictably hot paths reflect bad design decisions.
+
+Perf of MR-sys whole system has crept down to about 37MHz, having added caches, MMUs, etc.
+
+On Virtex5:
+- Reset seems to cost 4.5ns in routing alone!
+
+Units in isolation:
+- IF 14.4ns (71MHz)
+- DE 10.8
+- EX 10.6
+- MEM 17.8
+
+MEM should be about the same as IF, except the output formatter (bumloads of
+muxes) might well cost a few ns.
+
+Tough paths:
+
+DE rlock(wr_gpr) -> stall -> IF -> ITC read strobe -> IC RAM:
+- lock state will depend on annul? Or is this just a plain read of the rlock array?
+
+EX rotmask -> int_res -> crf -> br_taken -> ... stall to ICache:
+- Fixed this: added a dedicated comparator so br_cond does not depend on int_res (which
+  is a large comb mux of large comb functios).
+
+MEM addr -> TLB -> D$ tags -> mem_stall -> EX stall -> DE stall -> IF TLB lookup -> I$:
+- This is a classic:  the IF cycle time effectively needs to swallow the DMMU and D$ tags
+  lookup time, since stall is a combinatorial dependency!
+
+A few ideas follow:
+- Skid buffer between IF and DE, meaning stall to IF is guaranteed generated close *and* at start
+  of cycle (i.e. not comb anymore).
+
+Let's try that...
+
+Other critque:
+
+Pipeline control logic is not very clean, in naming or factoring.
+Ideally, each stage would have an instance of a control blob that
+takes stall_from_downstream, valid_from_upstream,
+want_to_stall_in_this_stage and generates a simple "clock enable".
+The multi-cycle EX stuff would need some extras, but that would clean
+things up a lot.
+
+The usage model of the caches is particularly delicate: for good
+reason, if you ask for a given address and the cache stalls you, you
+have to hold the addresses stable.  However, this is annoying for all
+parent modules and it'd be good to solve the "and hold" internally.
+That would mean the parent modules are free to stop requests/invoke
+new ones and the "UI" is much simpler: If you request something and
+you get an ack, it happened, otherwise it doesn't (including the case
+where you drop request).
+
+----
+22 Feb 2021
+
+Implemented a sorta-skid-buffer at output of IFetch.  Testing:
+
+IPC:
+10M cycles in verilator
+without:        Committed 12950427 instructions, 27049569 stall cycles, 40000000 cycles total
+with:           Committed 12997475 instructions, 27002521 stall cycles, 40000000 cycles total
+
+IPC actually slightly better (0.324->0.325)
+
+Implementation:
+
+That seems to take this path out of the top N (doesn't show in timing report) but
+there are other similar paths to work on:
+
+Some mysterious DTC/cache_valid -> ITC/requested_address.  (Is this newpc somehow?)
+- cache_arb?  some false dep for the inactive requester?
+(TEST: Was 28.46ns (for 100MHz target):  disabled the invalidation req into IF:
+(-0.5ns??))
+Different build, seems cache_valid -> dtc_hit -> memory_stalled -> execute_annul! -> ITC/strobe
+
+AH, IDEA: execute_br_cond was saying br_taken=0 if stall, meaning annul depends on stall
+which is another path for IF to depend on MEM's stall.  Separating this:
+- To make br_taken calcs not depend on stall, that permits br_taken when stalled
+- Annulling earlier stages resets the instructions, so branch goes away :(
+
+It's safe to annul in same cycle as newpc; so, in this case, EX could set a sticky annul
+and later when MEM asserts newpc, annul is cleared.
+...
+but still have the problem that the instruction goes away from EX when EX annuls!
+I.e. de_instr etc. outputs are reset.
+
+-- Possible solution - do annul from MEM (alongside newpc)
+-- or somehow pulse sticky_annul at *end* of MEM stall
+
+(With a broken implementation, separating that path helps, now up to 38MHz :P)
+
+OK, seemed simplest to annul in same cycle as new_pc from MEM!  Why not?  What's the point
+of the early annul anyway?  Possible increased chance of I$ miss I guess.
+AH: and another thing has issued; locked its registers... Need to zero locks on mem_annul
+which is SUPER-MESSY because there's an instruction in WB that's unlocking stuff, which will
+already be zero. Oh well.
+
+..AND that doens't work as it breaks deps: mfspr at branch dest issues before branch-link is written back, because link reg is gone.
+- Is there a way to more simply stall DE so rlock isn't cleared on branch, but annul only
+  chomps instructions that haven't locked regs?  so DE reacts to stall perhaps ...
+
+What about annul freely w/o stall from EXE, somehow keeping BR instruction for when MEM stall goes away? :(
+What about decoupling annul in IF from cache read, e.g. do the read anyway? (but maybe don't miss).
+
+----
+11 March 2021
+
+Baseline SoC build for 100M target now seems to be 24.64ns (40MHz) (but was what, 28 last time???)
+
+Removed early dep on annul in ifetch: annul makes the stage go invalid, but might do an I$ lookup.
+-- didn't change anything much, but now gets to 23.229ns.  (43MHz)
+This is just from cmdline, do path analysis properly tomorrow.
+
+----
+12 March 2021
+
+Make it operational again, hacks to make MEM annul broke evertything and I can't remember where I was.  Reverted that -- but now IF doesn't really have a long dependency on annul, so annul can be "late" in the cycle anyway.
+
+investigate those tristates: better idiom? where are they pruned? There are other synth/map messages alluding to hampering timing also.
+- Oh, yes.  gprf is a bit silly -- it checks for write of same reg in both ports but doesn't do much sensible with that.
+- fix gprf to write only if no contention.  (Hmm, still finds tristates, ffs. Try priority.)
+
+----
+14 March 2021
+
+Target for 60MHz, and enabling -register_balancing, achieves 18.7ns (53MHz).  (This includes the fix for IF not depending on early-annul.)  OK, that's good.  Now just make that fix functional ;-)
+
+(Later)  OK, got it.  It was much simpler than I'd thought: on an annul cycle, do a fetch but make out_is_valid=0.  If IF is stalled, the annul doesn't matter because the newPC will be heeded next time the stall unblocks itself.  (This is how it worked before: stall goes 0, then a fetch is started again -- which might now be a different PC to the one causing the stall!)  The other critical part is to not advance PC if annul!  (The logic is such that an annul in the same cycle as a newPC (a la exceptions) originally stopped a fetch & fell into the "capture newPC" clause.)
+
+Now boots in sim!  Synthesises & meets timing at 55MHz (with reg balancing, w/o I2S/LCDC)!
+
+On FPGA:  works well.  OK, I'll take this one as a success.
+
+Crit paths are now things like MEM newPC -> IF newPC -> ITLB -> I$ which make sense.  Look at speeding up TLB/Cache.  (4x4KB was done so that cache tags can be selected from bare PA, maybe there's an egregious 'enable' in there depending on TLB hit?  CHECK.)
+
+---
+
+When re-adding I2S/LCDC, path drops to 21.96ns (i.e. 45MHz).  Argh!
+Mysteriously, this shows new crit paths in CPU *not* system.  :(
+
+I'm confused about timing reports:  PAR's output, and trce .. seem to say this fails to meet timing.  timingan report seems to say timing is fine :(
+
+
+----
+3 April 2021
+
+Been doing some performance analysis.  Has been interesting to view implemented schematics in the tools.
+
+Have been optimising the single-cycle TLB lookup-and-cache-access as used in both Ifetch and data memory access.  This is not a great critical path (it is the core crit path today).
+
+Realised that the intended addr[11:0] wasn't flowing through MMU!  Oops.  Fixed that, and a subtle priority problem with the cache arbiter.  The walk input was tightly registered, and I modified arbiter to always flow through the data address from the MMU unless a walk was happening.  My thinking was that as this is the default, and the walk is determined very close to the clock edge, that the address would be present immediately pretty much.  However, the arbiter is biased and I had used the TLB hitness as the high-priority request:  that meant that the address output could not be determined until the hit was determined.  Swapping the A/B inputs to the arbiter allowed it to be determined that address flows through unless walk, early in the cycle.
+
+It now hits 60MHz!  Yay!
+(No LCDC still -- remember that has probs!)
+
+W/o CPU (or LCDC):      13.744 ns (when targeting 60)
+                        9.703 (when targeting 100)
+
+OK, so system is currently "fast enough".
+
+Trace report seems sorta nonsense... Reset taking 6.6ns yes, I'm resetting much too much.  But seems to imply console UART REGIF is involved with ZBT RAM controller.  WAT?
+
+W/O CPU, w/ LCDC:       10.144ns (targeting 60)
+
+Hmm, okayyyy.... why did I have problems meeting timing with the CPU then?  Pure size/routing contention?  LCDC isnt' that large :(
+
+LCDC:
+Can I mark the dodgy CDC signals as false paths?  The worst thing that can happen (assuming metastability resolves ..) is a glitch for one frame.
+
+(Built targeting 60, 16.371ns (met timing) with LCDC.  OK.)
+
+What's the best now?  Target 75: ... er, 29.515.  FFS.
+Target 66.6666... 28.158ns FFS
+--> CPU critical path MEM through DTC to cache miss & mem_stalled.
+LCDC affects CPU.
+
+Try doing pixclk = sysclk: (seems a very large number of bad paths ... pclk is faster in this test.)
+--> Results in 18.5ns :(
+
+Q ****: Somehow move the LCDC further away?  (APB pipeliner/delayer?)
+
+Try plain old 60MHz, regular PCLK:      16.343ns (61MHz) OK.
+
+Now the critical path is reported as:
+- I$ data ram out -> DFMTR -> IFSB mux out -> Decoder -> decode_out_c
+
+Remove loads of resets:
+
+Verilator: use --x-initial unique
+(And then srand48() initialise seed.)
+
+Generally, reset FSM states and valid bits.  Don't need to reset:
+- interconnect latch data (many many many bits)
+- TLB contents (just valid)
+- decode_bundle! (A billion bits)
+- Divider quotients etc.
+
+(not much difference but hey maybe easier to route.)
+
+---
+
+Do these things next;
+- add 2nd bank of memory (commit new interconnect)
+- design PIO SPI host i/f, and add simple storage/net?
+- build bluepill USB interface - test GPIO speed w.r.t. sim
+- design SD host w/ DMA
+- Investigate P70 PSU/screen dim issue
+- Wire up PDP/kbd and record demo (post-32MB upgrade and with some SD storage via SPI?)
+- Make flipped 1BPP work w/ linux FB
+
+
+----
+12 Apr 2021
+
+I can add more memory fairly easily but an interesting initrd with X is pretty large (30MB).  I need storage.
+Have been working on SPI for simple SD connection.
+
+(BTW: buildroot was huge and hard to cut down w/o rebuilding from scratch; with 16MB the kernel is very senstiive to OOM.  Weird stuff was going on with simpleFB enabled (which worked fine before), and new SPI driver.  Reduced initrd by about 400K ant it was better - re-check FB tho.)
+Wiring SPI to Pi4 ports:
+- SD card not responding
+- Mode 0 looks OK re phase etc.
+Lots of noise/glitches.  So add resistors, caps and better grounding.  ****
+
+----
+19 April 2021
+
+Been having great fun with developing SPI for quick SD card attach (in parallel, I'll design a proper SD host).
+Developed a Linux SPI driver onto an emulated SPI host block in MR-ISS ("co-design"...).  That seemed to work fine.
+
+Absolutely did not want to build an SD card emulation for MR-ISS.  Also wanted to try out this sim technique:
+- Drive SD card from RPi GPIO
+- Run MR-ISS on RPi4
+- When SPI transfers occur, bitbang real SPI bus
+- Emulated Linux can see/use SD card
+
+Works nicely!  SCLK is about 1MHz.
+
+PS: remember to commit that reset-removal work!
+
+----
+28 Apr 2021
+
+Adding 2nd bank of memory.  Bizarrely the HW seems to work (fw memtest OK), but Linux doesn't like 16+16 banks.  Tweaks in mm/init_32.c to permit >1 bank (!) but fails with:
+
+mr_setup_arch()
+MR Platform
+Top of RAM: 0x41000000, Total RAM: 0x1fa5000
+Memory hole size: 1008MB
+Zone ranges:
+  Normal   [mem 0x0000000000000000-0x0000000040ffffff]
+Movable zone start for each node
+Early memory node ranges
+  node   0: [mem 0x0000000000000000-0x0000000000fa4fff]
+  node   0: [mem 0x0000000040000000-0x0000000040ffffff]
+Initmem setup node 0 [mem 0x0000000000000000-0x0000000040ffffff]
+On node 0 totalpages: 8101
+Kernel panic - not syncing: Failed to allocate 8519680 bytes for node 0 memory map
+CPU: 0 PID: 0 Comm: swapper Not tainted 5.10.0-00032-gd09a0afe476f-dirty #63
+Call Trace:
+[c04abe40] [c00265d0] panic+0x130/0x2fc (unreliable)
+[c04abea0] [c00a258c] alloc_node_mem_map.constprop.141+0x84/0xbc
+[c04abec0] [c03c49e4] free_area_init_node+0x210/0x4f0
+[c04abf30] [c03c4fb4] free_area_init+0x1d4/0x504
+[c04abf80] [c03be744] paging_init+0x7c/0xb0
+[c04abfa0] [c03bd6c0] setup_arch+0x18c/0x1a4
+[c04abfb0] [c03b9a84] start_kernel+0x60/0x420
+[c04abff0] [000034c0] 0x34c0
+Rebooting in 180 seconds..
+
+(Anyone run Wii linux?)
+
+Argh - so I can't move mem to be contiguous at 0x3f000000-0x40ffffff because I need mem at zero.
+And I can't get discontig memory to work as above.
+
+Ah - builds differently.  Default ppc32 model is FLATMEM??
+SPARSEMEM
+
+RTFM.  We are using FLATMEM, with CONFIG_ARCH_HAS_HOLES_MEMORYMODEL to work around that enormous hole.
+That means implementing pfn_valid() with something more nuanced than "zero to max is OK".
+That STILL seems to not help -- it sounds like the map is allocated then freed rahter than not allocated in the first place.
+
+Gross, this is going to be real work.  One last try for SPARSEMEM:
+
+OK, I fucking give up.  SPARSEMEM needs various bits of support and the PPC mem code is super gritty.
+
+Clever fix in hardware:  4x4 interconnect routes on A[31:30] to create 4x 1G regions.  Instead, interleave 4 regions by routing on A[25:24].  This gives:
+0xX0000000        16MB bank A
+0xX1000000        16MB bank B
+0xX2000000        IO
+0xX3000000        Boot RAM
+0xX4000000        16MB bank A...
+...
+Crucially, boot RAM is still accessed via 0xfff00000!  Just need to change IO addresses to 0x82000000.
+
+Trying this:
+- ISS done
+- FW done (runs, displays stuff in ISS)
+- Linux DT done (runs in ISS)
+- Interconnect done (verilated thing runs)
+
+First FPGA test ... totally dead.  LEDs blink but code seems dead, nothing on UART :(
+Second: FW runs, memcheck OK (yey) at 32MB.
+However, kernel load/exec seems to ... do nada.
+16M OK.  32M ... ?
+
+Must have been something crusty in the build? (hm!)  32MB Linux boots now, on FPGA.  (YAAAASS.)
+..And dies.  Next run OK.  (Hmm, okay.  Memory may need a more thorough memtest.
+Also, try another board, this one has RMA sticker (RMA 5179) - may have been 2nd RAM bank?)
+
+(Hm - dt with linux-usable-memory 32MB-fbsize did't boot (no output) whereas reg property did.)
+
+Running many ascii-invaders causes a lockup.
+
+debug write random data, read: (works 32 times! hmm)
+
+Extend firmware memtest- try randomised addresses (perhaps do it cached)?
+Running w/ 16M seems to die. (note this is the 'A' 16M so not comparable to running 16M before)
+
+--> try swapping banks, i.e. original B at 0, A at 16M, then see how stability changes.
+Could try to then use 16/20/24/28/32M.
+
+----
+29 April 2021
+
+(Reverted Linux changes, confirm crashes still w/ 16M (out of bank A).)
+Before swapping banks, try making A look same in UCF:  B has SLEW=FAST on A/D/ctrl and PULLDOWN on D:
+- Doesn't seem to help. Ran 12x ascii_invaders & locked up.
+- Noticed a black line across FW boot logo (RHS).  Found a cache clean issue in fb_cls(), but that shouldn't be a problem w/ the logo.
+
+Trying bankswap (w/ 16MB)
+- Same!  Boots fine, runs ~11 ascii_invaders before death
+
+Validate this is NOT a problem on ISS!!!!
+- Can run many ascii_invaders -- weird stuff happens when memory gets tight (OOM killer invoked) but machine doesn't lock up.
+
+
+Now have updated FW to fix FB CMOs:
+Make more thorough memtest.
+
+What's different?
+- uncommitted "fewer resets" work: try stashing
+- 32MB SoC: try an earlier run
+- Kernel w/ SPI (it's disabled tho.. unlikely)
+
+Aha:
+- exported from ISS a kernel running 12 ascii_invaders
+- imported into verilator, hit enter/ran free - it seems to lock up
+- reg state looks like it's all in a loop
+- dumped
+
+Getting a 400 over and over, PTW on 1003D6E0:
+- Searches PTEG 0xff9300/0xff6cc0
+- Misses
+- create_hpte pushes in an entry to ff933c (PTE 00ff9338) (top dd833880, writing 0062e103)
+- RFI
+- PTW on 1003D6E0 -- misses again
+Huh! Data loaded from ff9338 is correct (0062e103 dd833880)
+
+Ah, but it doesn't match: Valid yes, vsid matches, api matches, but pte[6]=0 whereas pte_idx[3]=1 (pri/sec)
+
+***** FOUND IT:  The 'H' bit check was based off pte_idx, which has been incremented by the time PTE is checked.
+Capture the bit used at the time of the fetch (not the time of the comparison).
+
+Trying to recreate now that's fixed:
+- Excellent, now get super-duper OOM-killer action going on!
+
+NOW.... try on real HW: YAY it works.  32MB is present and correct.
+(Undo the A/B swap)
+
+Declare 32MB success!
+
+----
+29 Apr 2021 (again)
+
+Now, onto SPI:
+- Add APB component
+- Plumb out to toplevel
+- Build board w/ SPI headers
+- Add to kernel
+- Test with SD card!
+
+Difficulties:
+- CS is working
+- Don't see anything on CLK or DOUT when sending stuff :(
+Pins in .mrp look OK.  Connections beeped OK on breakout board, but may be flaky ;(
+Could mirror to misc perhaps? (or LEDs, or use scope)
+(Routed to misc: still same, nothing on CLK or DO, CS works. WTF?)
+
+Bug report: left it printing to console, eventually got:
+
+irq 16: nobody cared (try booting with the "irqpoll" option)
+CPU: 0 PID: 12344 Comm: date Tainted: G        W         5.10.0-00032-gd09a0afe476f-dirty #76
+Call Trace:
+[c1f8ff40] [c005296c] __report_bad_irq+0x34/0xc4 (unreliable)
+[c1f8ff60] [c0052870] note_interrupt+0x220/0x2b0
+[c1f8ff90] [c0050200] handle_irq_event_percpu+0x50/0x5c
+[c1f8ffb0] [c0050240] handle_irq_event+0x34/0x4c
+[c1f8ffc0] [c00538dc] handle_edge_irq+0xcc/0xec
+[c1f8ffd0] [c004f7d0] generic_handle_irq+0x2c/0x48
+[c1f8ffe0] [c0004e30] __do_irq+0x50/0x54
+[c1f8fff0] [c000a8c4] call_do_irq+0x20/0x38
+[c10e3cd0] [c0004e94] do_IRQ+0x60/0x68
+[c10e3cf0] [c000d484] ret_from_except+0x0/0x14
+--- interrupt: 501 at uart_write+0x80/0x104
+    LR = uart_write+0x100/0x104
+[c10e3de8] [c01d1824] n_tty_write+0x274/0x3b0
+[c10e3e48] [c01cc420] tty_write+0x178/0x210
+[c10e3e78] [c00b58a0] vfs_write+0xc8/0x1a4
+[c10e3ee8] [c00b5a9c] ksys_write+0x68/0xb4
+[c10e3f38] [c000d11c] ret_from_syscall+0x0/0x34
+--- interrupt: c01 at 0xb794f524
+    LR = 0xb7970a9c
+handlers:
+[<099acabc>] mru_isr
+Disabling IRQ #16
+
+----
+30 April 2021
+
+Getting SPI to work.  Logical problem?  Verify mr_top works in verilator...
+(Could even be bug in driver?)
+- Works in sim/verilator
+- Added "spi test" to FW, which *does* now work on MISC header
+- Linux tweaks CS but *doesn't* output anything on clk/DO.  FFS!
+
+I notice that linux debug printfs seem to always say RUN is immediately 0 ... interesting. In the VCD it seemed to take 2 polls... and then:
+ARGH FUCKING HELL:  I moved the "RUN" bit from 0x10 to 0x80.  ISS & Linux driver were still using 0x10.
+Lazy, to save me rebuilding bitstream, move driver/ISS to 0x80.
+
+Anyway.
+
+Now it all works, and it's wonderful:
+- Boots from SD card, with busybox "max" config
+- Some weird issues running X.org/fbdev (server starts, black screen tho - input maybe?)
+- Runs DFB demos very slowly
+- SD access is glacial; starting programs takes seconds (but re-starting them is much faster)
+- Seems really stable!
+
+So this is all good now!  GREAT SUCCESS.  Next steps have gotta be performance work.
+
+----
+3 May 2021
+
+SPI is super-slow.  Part of the reason is setting up data, transferring and wasting time spinning while that finishes.
+A double-buffer approach would work better, e.g.:  TXD/RXD for A and B banks, and even run_a, run_b bits.
+SW would use as follows:
+- Fill tx_a and set run_a
+- If data left to TX/RX, fill tx_b and set run_b
+- Wait for run_a to clear
+- If data left to TX/RX, fill tx_a and set run_a
+- Wait for run_b to clear
+- If data left to TX/RX, fill tx_b and set run_b
+- etc.
+- Wait for (whatever last buffer was) to clear
+
+----
+9 May 2021
+
+Let's try to get IPC up.  Booting simpleImage.initrd.mr3initrd in ISS for 100000000 instructions, then 1000000 cycles in verilator:
+Complete:  Committed 328354 instructions, 671642 stall cycles, 1000000 cycles total
+IPC 0.33, not amazing.
+
+First idea, flow-through WB value to GPR read.
+(Then proper forwarding.)  The annoying thing about FPGA RAM containing the read FF is that the only forwarding from MEM result is *after* the FF, i.e. in WB anyway.
+Could forward from the EX result output FF in MEM
+Could also forward from the EX intermediate result before EX's FFs (though careful on multi-cycle ops)
+
+(didn't do any RTL today)
+
+----
+10 May 2021
+
+Performance counting:
+- Make it easy to add, and bundle up:  present wires from modules that give a 1-cycle pulse when something interestign is to be counted
+- These can be bundled, and pipelined to an external counter unit
+- Unit increments a counter (of variable size) upon pulse
+- Unit can do things like APB interface, and capture-on-rollover
+Would like a script to generate counters & descriptions from the source -- and generate read/interpret script for use over debug channel on host.
+
+
+----
+12 Jul 2021
+
+(big gap! :( )  Got coremark building.
+
+ make PORT_DIR=baremetal-ppc  ITERATIONS=25
+ powerpc-linux-gnu-objcopy coremark.bin -O binary coremark.realbin
+
+It seems to run under MR-ISS "fine", but crashes w/ an unaligned access from memcpy at the end:
+
+~~
+2K performance run parameters for coremark.
+CoreMark Size    : 666
+Total ticks      : 760819
+Total time (secs): 0.030433
++++ EXC -> Handle exception 5 from mem addr 0x1ff58d, RnW 1, InD 0
+CPU[0] state:   Icount 00000000002ec335
+ PC  00007434   LR  00004c00   CTR 00000001   CR  40002448   XER 0000000020000000          MSR 00000000   DEC fff44f32
+ r00 00004a68   r01 001ff130   r02 00000000   r03 001ff14b   r04 001ff588   r05 00000009   r06 001ff585   r07 001ff148   
+ r08 00000001   r09 001ff148   r10 001ff585   r11 32382e35   r12 80002442   r13 00000000   r14 001ff14b   r15 fffffff3   
+ r16 0000000a   r17 000098c8   r18 fffffff2   r19 00000025   r20 00000030   r21 00000000   r22 00000030   r23 0000003a   
+ r24 0000002e   r25 00000000   r26 00009840   r27 51eb851f   r28 cccccccd   r29 00009818   r30 001ff138   r31 000094a0   
++++ EXC Exception 0x600 at PC=00007434, MSR=00000000, SRR1=00000000
+~~
+
+On CPU sim (at bfe850c82c1a8a3f350f6605d1954db59e31729b) we get:
+~~
+2K performance run parameters for coremark.
+CoreMark Size    : 666
+Total ticks      : 9530062
+Total time (secs): 0.381202
+*** Branch to self: Exiting
+Complete:  Committed 7629820 instructions, 11483509 stall cycles, 19113334 cycles total
+~~
+
+Note the MR-hw sim has perfect RAM, but then Coremark fits in 2K so memory should be largely irrelevant!
+
+TB is at 1/2 speed.  Pretend CPU is 2MHz and TB is at 1MHz; a tick is 1us.
+
+So, that's 25 iterations in 9.53s.  That's 25/9.53=2.63 CoreMarks/sec.  At "2MHz" that's then 1.315 CM/s/MHz.
+Apparently similar to an US T1 or a Celeron ...  M3s etc. seem about 1.5+
+
+CPI=0.39 (roughly similar to other Linux code)
+
+Right.  Got something to measure, now start improving that :P
+
+
+----
+13 Jul 2021
+
+Starting point:
+gtest.hex:	Complete:  Committed 1720586 instructions, 2244819 stall cycles, 3965581 cycles total (IPC 0.434)
+coremark:	Complete:  Committed 7629820 instructions, 11483509 stall cycles, 19113334 cycles total (IPC 0.399)
+
+Step 1, implement WB-GPR read forwarding:
+
+Jesus!  It fucking compiled first time and appears to run gtest.hex & coremark!
+gtest.hex:	Complete:  Committed 1720586 instructions, 2053017 stall cycles, 3773779 cycles total (IPC 0.456)
+coremark:	Complete:  Committed 7629642 instructions, 10065858 stall cycles, 17695505 cycles total (IPC 0.431)
+
+2K performance run parameters for coremark.
+CoreMark Size    : 666
+Total ticks      : 8823122
+Total time (secs): 0.352925
+*** Branch to self: Exiting
+Complete:  Committed 7629642 instructions, 10065858 stall cycles, 17695505 cycles total
+
+(Coremark goes to 1.42 CM/s/MHz, up 8%.  Yay!)
+
+
+----
+17 Jul 2021
+
+One more test, remembered there's a checkpoint running linux:
+
+$ ./verilator/obj_dir/Vtb_top -A /Users/matt/code/MR-ISS/savegame-linux-booting -l 20000000
+
+No forwarding:
+Complete:  Committed 6138169 instructions, 13860588 stall cycles, 20000000 cycles total (IPC 0.307)
+
+With WB forwarding:
+Complete:  Committed 6371787 instructions, 13626890 stall cycles, 20000000 cycles total (IPC 0.319)
+
+Meh, 4% increase!  But note, this is full-system with real memory, whereas coremark/gtest have perfect memory.
+
+
+----
+17 Jul 2021
+
+Plan for EXE to DE forwarding:
+- A candidate instruction is one that writes a GPR (!), i.e. WB is RT=R0/RA=R0 etc.
+- Generates into execute_out_R0
+-- All instructions generate GPR results into R0 with a couple of exceptions (e.g. mfcr/mfmsr into R1), so just fwd R0
+- Export res_int
+- Export valid flag:  In decoder (in exe stage), exe_R0 = EXUNIT_INT && exe_R0_enable* && mem_pass_R0 && wb_write_gpr_port0 && wb_write_gpr_port0_from = WB_PORT_R0 means the exported value is a goodun
+- Export wb_write_gpr_port0_reg as the ID of the reg
+- Finally in DE check if the reg ID matches.
+- In DE prioritise EX fwd over MEM fwd over WB fwd
+
+res_int is already the output of a mux from e.g. res_alu vs res_div vs res_mul so extra combinatorial/mux before DE's operand FFs shouldn't hurt.  What I'm thinking is if it was a perfectly FF-FF pipelined path for MUL the forwarding would impact that.  But it isn't and shouldn't.
+
+*: Should really get rid of these enables & do a zero-is-NOP decode
+Measure how many stalls come from cond_read_stall -- worth forwarding xercr? (probably)
+
+OK, implemented that, and (compiles and appears to work first time?? again? :) :
+
+gtest.hex: 	Complete:  Committed 1720586 instructions, 1874727 stall cycles, 3595489 cycles total (IPC 0.479)
+coremark:	Complete:  Committed 7629822 instructions, 8913938 stall cycles, 16543765 cycles total (IPC 0.461)
+Linux 20M:	Complete:  Committed 6526427 instructions, 13472251 stall cycles, 20000000 cycles total (IPC 0.326)
+
+(From no-fwd, +6.2% on Linux, +10.4% gltest, +15.5% coremark.)
+
+And finally, plan for MEM forwarding is quite simple: can't forward load data that cycle (sync read gives data in WB), so it's just R0 passed through.
+
+
+----
+18 Jul 2021
+
+Missed a forwarding case from EXE: a fair few instructions write exe's R0 back via port1 (e.g. load with update).
+Adding this gives a tiny bump:
+gtest.hex:	Complete:  Committed 1720586 instructions, 1873733 stall cycles, 3594495 cycles total (IPC 0.479)
+coremark:	Complete:  Committed 7629718 instructions, 8905501 stall cycles, 16535224 cycles total (IPC 0.461)
+Linux 20M:	Complete:  Committed 6533074 instructions, 13465604 stall cycles, 20000000 cycles total (IPC 0.327)
+
+OK, now do forwarding from ME-DE.  Consistent w/ above forward R0 when mem_pass_R0.
+
+gtest.hex:	Complete:  Committed 1720586 instructions, 1805891 stall cycles, 3526653 cycles total (IPC 0.488)
+coremark:	Complete:  Committed 7629802 instructions, 8850579 stall cycles, 16480386 cycles total (IPC 0.463)
+Linux 20M:	Complete:  Committed 6574181 instructions, 13424481 stall cycles, 20000000 cycles total (IPC 0.329)
+
+Overall, +7.2% on Linux, +12.4% on gtest, +16% on coremark.  Not bad.
+
+
+----
+18 Jul 2021
+
+Still a fair bit of stalling for operands (by inspection from wave):
+- Write operand stalls: WAW hazard.  This can be solved using a 2-bit scoreboard; there could be a write in WB, MEM and EX at any one time.
+- Condreg/xercr! For both read and write stalls.  Forward R values, 2-bit scoreboard W values?
+
+So, let's try .... 2b scoreboard/rlock!
+An array of 2b vectors would look clean to access, but there are times when I want to blat them all, and syntax gets messy here. (Or I open-code it all and it's gross.)
+
+
+----
+19 Jul 2021
+Bugfixing the 2-bit scoreboard:
+
+    10a0:       3c 60 00 01     lis     r3,1		// (3)=1
+    10a4:       38 63 ff f0     addi    r3,r3,-16	// (3)=2
+    10a8:       3c 80 de ae     lis     r4,-8530	// (4)=1
+    10ac:       38 84 be ef     addi    r4,r4,-16657	// (4)=2
+    10b0:       94 83 ff fc     stwu    r4,-4(r3)	// (3)=0 !!!
+    10b4:       94 83 ff fc     stwu    r4,-4(r3)	// (3)=1
+    
+    10b8:       94 83 ff fc     stwu    r4,-4(r3)
+    10bc:       94 83 ff fc     stwu    r4,-4(r3)
+    10c0:       7c 6a 1b 78     mr      r10,r3
+    10c4:       3c 80 46 4f     lis     r4,17999
+    10c8:       38 84 4f 00     addi    r4,r4,20224
+    10cc:       94 83 ff fc     stwu    r4,-4(r3)
+    10d0:       7c 6b 1b 78     mr      r11,r3
+
+Bug is that r3 is being written back by ADDI and also STWU being issued, so there's a scoreboard -1 and +1 happening simultaneously.  The -1 wins and score for r3 goes to 0.  It should stay constant.
+There was a FIXME I'd been ignoring.  At various places previously I'd done this:
+if (writes reg)
+   rlock[reg] <= 1;
+if (wb_happening)
+   rlock[reg] <= 0;
+
+What happens if both are true?  It seems the change to +1 or -1 tipped the balance.
+
+(14 Nov, non-linearly revisiting this.  Put this on another branch for now -- decode etc. needs a large refactor to make this palatable.)
+
+----
+20 Sep 2021
+
+See notebook: got PS/2 running, wrote driver for mouse/keyboard, and got X11 working.  (It was a black screen as needed "GrayScale" visual.)
+X works nicely, though SD card perf is awful.
+
+__  __ __        ___           _                   
+\ \/ / \ \      / (_)_ __   __| | _____      _____ 
+ \  /   \ \ /\ / /| | '_ \ / _` |/ _ \ \ /\ / / __|
+ /  \    \ V  V / | | | | | (_| | (_) \ V  V /\__ \
+/_/\_\    \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/
+                                                   
+
+----
+2 Dec 2021
+
+Been implementing the double-buffered SPI.  (Also fixing the wait-completion in the regular
+one, which had a bloody delay in the wrong place: baseline is now 400K/s (not 140K/s.....).)
+
+SPI debug like this.  Add an spidev DT note which exports an SPI controller to userspace:
+
+&spi0 {
+      status = "okay";
+      spidev0: spidev@0 {
+               compatible = "spidev";
+               reg = <0>;
+               spi-max-frequency = <1000000>;
+      };
+};
+
+Then just copy to/from /dev/spidev0.0
+
+./tools/debug_peek_poke.py -s /dev/ttyUSB1 -b write 0x700000 ~/kb/mr/arch/powerpc/boot/simpleImage.initrd.mr3initrd && ./tools/debug_peek_poke.py -s /dev/ttyUSB1 -b ww 0xfff00010 0x700000
+
+Screengrabs with:
+./tools/debug_peek_poke.py -s /dev/ttyUSB0 read 0x1fa5000 0x4b000 /tmp/sg.gray && convert -size 640x480 -depth 8 /tmp/sg.gray  /tmp/sg.png
+
+----
+6 Dec 2021
+
+A couple of fixes & corrections to SPI driver, now getting 660KB/s from PIO SPI mmc.  Also mmc_spi supports SDIO, which is nice.  Tried ESP8089/UF60xx WiFi modules with lots of driver woe.  Fell back to ENC28J60 (showed an SPI bug, dropping CS between transfers in a message).  That fixed, now have ENC + IRQ going, and wired ethernet!
+
+Very very slow -- lots of demand paging running Dillo.  I think more memory is absolutely required now, exacerbates using the polled MMC stuff. :(
+
+(Got OOM on Dillo trying to load anything remotely large..)
+
+----
+9 Dec 2021
+
+Playing with NetBSD.  It _immediately_ smashes into doing a kmalloc that ends up in HTAB-translated memory, and dies due to a write to a page with C(hanged)=0.  So, probably best to implement R/C updates ;(
+
+Testing this by implementing R/C update in MR-ISS!  Yes-- NetBSD now gets loads further, with VM operating OK.
+
+The other issue is netbsd has unaligned stuff in the kernel; experiment with GCC flags?  (There isn't an unaligned op handler for kernel!)  Fixed kernel with -mstrict-align.  Kernel DOES support re-alignment fixup for userspace, phew.
+
+----
+10 Dec 2021
+
+Thinking about R/C update; the locked cache RmW is OK (just have a "sticky" arbiter on the cache), but a more difficult part is that a usable TLB entry can cause an update (e.g. a write after a read) and *that* TLB entry needs to be replaced with the new upgraded RW one.  Could do this by:
+- PTW issues an invalidate before returning the TLB entry
+- TLB self-invalidates a TLB entry having a C=1 flag on it before making the PTW request
+
+----
+3 Jan 2022
+
+Foggy, just did some minor cleanup of signal sizes/verilator warnings.
+
+There still seems to be a 64b adder for the TB update stuff, redo this.
+
+----
+4 Jan 2022
+
+As more evidence that I should refactor IF/MEM to split MMU into a different cycle,
+added MMU_STYLE parameter to the CPU to permit a completely BAT-less/MMU-less CPU.
+
+We get the following:
+ifetch  |    10.396ns
+memory  |     9.256ns
+decode  |     8.630ns
+
+Previously (full MMU):
+ifetch  |    14.972ns
+memory  |    13.510ns
+decode  |     9.096ns
+
+Looks like ~100MHz will be possible, with some minor exe shuffling too.
+
+(Next, I'll refactor DE to finish forwarding/scoreboard stuff.  It's hideous:
+an advantage of working on a long project over years is you forget how it works,
+then get to critique your work in terms of maintainability (versus raw fog of enthusiasm).)
+
+Messing w/ simplifying decoder fields/immediate decoding:
+9.284ns (argh. chance?)  9.2 again, wtf. 10.447! blah. Then suddenly 8.607ns.
+(MR-sys build still meets 16.374ns, no change but I'm not pushing that.)
+
+Operation IPC:
+- Split decoder into chunks
+- refactor decoder into clear comb/sync
+- locking/tracking in submodule/in one place
+- priority encoder for WAW counting
+
+----
+13 Jan 2022
+
+Really productive few evenings/afternoons!  Refactored decoder to:
+- Split out TB/DEC
+- Handle bypass in a new module
+- Flag register consumption/writeback to common regdeps logic
+- Split that regdeps and stall logic into a new module
+
+Now, the biggie, remove WAW stalling by implementing a proper 2-bit scoreboard.
+Tests:
+
+BEFORE:
+Plain testprog:
+Complete:  Committed 10705 instructions, 38999 stall cycles, 49723 cycles total
+
++INPUT_FILE=gtcomb.hex
+Complete:  Committed 1720586 instructions, 1805830 stall cycles, 3526592 cycles total
+
+10M cycles on savegame-linux-initrd-100M:
+Complete:  Committed 3291643 instructions, 6707758 stall cycles, 10000000 cycles total
+
+
+AFTER:
+step 1, correctness. :-)  testprog OK.  Linux no output.
+
+gtcomb displays errors, though sums match!
+(gtcomb:
+Stage 1: Sum f30e2b14
+e8e9db48b71cb365efcb882dd6d6ab70
+Stage 2: Sum 1146c31e3a1
+348b0b9926b85653d7c01a4f9f2dd6eb
+)
+Got the bug, bypassing issue: choose newest (or stall if that doesnt' bypass, even if an older
+version exists!)
+example:
+        add r1, r2, r3
+        mfctr r1                // Doesn't bypass for reasons
+        sub r7, r1, r3          // This was getting r1 from the add!
+
+potential for perf is large, new gtest is 2622403 cycles instead of 3526592, i.e. IPC 0.65 instead of 0.48!!! +35%
+
+----
+14 Jan 2022
+
+Extended bypass logic to check whether an earlier stage /owns/ that register but isn't forwarding,
+and disables bypass altogether in these cases.  However, gtest still breaks & one fail on random testing:
+
+   121a4:       7c 83 c6 70     srawi   r3,r4,24
+   121a8:       7c 20 f3 d6     divw    r1,r0,r30
+   121ac:       7c 28 02 a6     mflr    r1
+   121b0:       7f 0e 0b b9     nand.   r14,r24,r1      // r14 is wrong
+
+Ah! No, I'd just implemented the fix dumbly.  (I'd only looked at one a/b/c port...)  Now it works:
+Complete:  Committed 1720586 instructions, 983443 stall cycles, 2704205 cycles total
+
+That's pretty good!  gtcomb completes in 76% of previous cycles.  IPC now 0.636 (oooooooo)
+Linux 100M cycles on savegame-linux-initrd-100M:
+Complete:  Committed 34767058 instructions, 65228027 stall cycles, 100000000 cycles total
+IPC 0.348
+10M (compare with above):
+linux100M+10M:  Complete:  Committed 3393850 instructions, 6605550 stall cycles, 10000000 cycles total
+gtcomb:         Complete:  Committed 1720586 instructions, 983443 stall cycles, 2704205 cycles total
+coremark:       Complete:  Committed 7629731 instructions, 7698222 stall cycles, 15327958 cycles total (IPC 0.498)
+
+Tiny bit more work to do:  enable forwarding for things like mflr/mfctr and XERCR!
+(A)
+Enabled EX forward from PORT_C for mfspr:
+linux100M+10M   Complete:  Committed 3401177 instructions, 6598223 stall cycles, 10000000 cycles total
+gtcomb:         Complete:  Committed 1720586 instructions, 981568 stall cycles, 2702330 cycles total (IPC 0.637..)
+coremark:       Complete:  Committed 7629731 instructions, 7698132 stall cycles, 15327868 cycles total
+
+(Synthesis problems now :( 20.28ns/50MHz ;((( )
+Enabled XERCR forwarding: (was minor for WB, minor for MEM, lots for EX as well):
+linux100M+10M   Complete:  Committed 3677399 instructions, 6321965 stall cycles, 10000000 cycles total
+gtcomb:         Complete:  Committed 1720586 instructions, 866678 stall cycles, 2587440 cycles total (IPC 0.665)
+coremark:       Complete:  Committed 7629814 instructions, 5303635 stall cycles, 12933454 cycles total (IPC 0.590)
+
+condition reg seems to bring biggest benefit!
+This is still without WAW of CR BTW.  (Test synthesis -- back to 60MHz, WTAF)
+Implementing support for >1 CR WAW with a 2-bit counter now gives:
+
+gtcomb:         Complete:  Committed 1720586 instructions, 727587 stall cycles, 2448349 cycles total (IPC 0.703!)
+coremark:       Complete:  Committed 7630415 instructions, 4403565 stall cycles, 12033985 cycles total (IPC 0.634)
+
+Summary:  bypass for XERCR was HUGELY important, possibly more so than for GPRs!
+Sequences like "cmp A ; beq X ; cmp B ; beq Y ..." are common.
+
+Arse, Linux is broken :(  When?
+It isn't CR >1 WAW.  It isn't WB/MEM bypass. Deffoez something EX.
+
+(AND, it's broken at (A) too, just with GPR forwarding, but later on FPGA, hangs in userspace &
+doesn't get to login prompt. Shites.)
+
+Ahhh bug:  the logic above kicks in when execute's bypass is not valid, and decides whether a stage "owns" a register.
+That doesn't work for two registers.
+Example:
+          ori	r9, r9, 1234	// in WB (contains r9, but too old)
+          blah			// in MEM
+          lwzu  r9,4(r10) 	// in EX (fwds r10!)
+          cmpw	r9, r10   	// in DE, gets 9 and 10 forwarded
+
+r9 is erroneously forwarded from WB, because the "no bypass unless most recent" logic
+doesn't turn off bypass, because execute_bypass_valid == 1, because EX produces r10
+(correctly) from an ALU op.  Arse!  Fixed.
+
+HOWEVER:  Linux gets to userspace before the XERCR work, but not when XERCR forwarded from EX.
+(BUG: stwcx was broken -- following cmp was getting XERCR bypassed, which it shouldn't have.)
+Was same as GPRs -- both EX and MEM might be responsible for writing XERCR, but might not forward (e.g. for STWCX).  So do no forwarding from later stages if an earlier stage "owns" writing XERCR.)
+
+Fixed:  linux looking better.  (Spoke too soon:  no, cant' exec init.  Fucking hell.  At least doens't hang in first 1M.)
+Fixed again (MEM doesn't bypass if EX should write it, WB doesn't bypass if *either* EX OR MEM should write it).
+
+OK, Linux does now run init, shell scripts etc. in sim are good.  YAY!
+
+linux100M+10M:  Complete:  Committed 3809171 instructions, 6190171 stall cycles, 10000000 cycles total (IPC 0.381)
+gtcomb:         Complete:  Committed 1720586 instructions, 679961 stall cycles, 2400723 cycles total (IPC 0.717)
+coremark:       Complete:  Committed 7630355 instructions, 3725507 stall cycles, 11355867 cycles total (IPC 0.672)
+
+Done!
+
+----
+18 Jan 2022
+
+Playing with the memory system.  A D$ miss -- without a spill! -- stalls for 15 cycles :(
+There are a few opportunities:  the mr_cpu_mic wrapper has a FSM that costs 1 cycle before making a
+request to mic_m_if, which also has a FSM that costs 1 cycle before making a MIC request.
+Potentially that logic -- a couple of muxes -- could flatten into one cycle before the interconnect i_steer4,
+and be done same cycle.
+
+Also, cache STATE_FILL exists purely to waste time/set up some values.  Experiment to go straight to
+STATE_FILL_TRANSFER (on plain fill-to-invalid-line):
+From:
+Complete:  Committed 3809171 instructions, 6190171 stall cycles, 10000000 cycles total
+To:
+Complete:  Committed 3877591 instructions, 6121727 stall cycles, 10000000 cycles total
+Hmm! +1.8% just for that. :)  (Spill state is used as beat #1 of data transfer, can't squash
+in quite the same way.)  (Agh, can't seem to do this with a SPILL->FILL transition either because
+that state is used to drop emi_req for 1 cycle.  Apparently I made EMI require emi_req return to 0.
+
+Clean up:  Use PLC in EX.  Seems to benefit IPC! (squashing stalls), minor for gtcomb/coremark but Linux now:
+Complete:  Committed 3895821 instructions, 6103513 stall cycles, 10000000 cycles total
+(+2.3%)
+
+Use PLC in MEM. (No advantage to IPC, but cleaner to read!)
+
+coremark:       Complete:  Committed 7630322 instructions, 3724696 stall cycles, 11355023 cycles total
+Coremarks/MHz:  ev "(25*1000000/11355023)" = 2.202
+
+Note 100M instrs of Linux boot has IPC 0.411, not too shite.
+
+----
+20 Jan 2022
+(and 21 Jan 2022)
+
+Branch prediction.  Simplest 1-entry predictor, good for loops.  Three fundamental
+problems:
+- Detect that a branch instruction is predicted one way or the other, in the cycle
+  that it's being fetched (i.e. with fetch PC in hand) so that the instr can be
+  output with the prediction attached.  (For now, stashing it in pc[0].)
+- Determine a predicted destination (in cycle after fetch, akin to a new_pc steering
+  the instruction fetch to a new place).
+- Cope with incorrect predictions
+
+The latter is the hard part:
+- Predict taken is actually not taken, or pred NT is actually T
+  - A branch instruction outputs the actual branch outcome, which can train the
+    predictor (T vs NT) and re-start fetch at the correct address.
+    Branch instruction flushes pipe for incorrectly-fetched path.
+- Predict wrong destination
+  - Similar to above, prediction correct but destination wrong.  Need to somehow
+    inform br instruction of predicted destination, and get it to annul mispredicted
+    path from EX :((((((
+- False positives!  MUST cope with the case that a non-branch
+  instr is thought to be a taken branch, with a shadow of instrs from effectively
+  some random PC.
+- Remember a sequence of branch instrs might happen, each triggering a new change.
+
+A mis-predict is OK:  annul and give the correct destination (just like the current
+design does when a branch is taken).  If taken, BP saves the destination.
+
+Ideas for dealing with false +ves:
+- Need to detect "branch, taken" && not a branch instruction.  Do this in DE?
+  (NB it might be hard to "convert" one instr into adding on a "and recover" branch
+  too.  For example, a mtmsr is effectively a branch to PC+4, but isn't predicted-over
+  (it changes MSR so is exempt).  However, if branch logic were to be overlaid, it'd break
+  the original operation.  (RFI probably same.)
+- Detect a mis-marked instruction in DE, and synthesise/stuff a recovery branch to PC+4!
+  (unless annulled, etc. by a later stage.)
+
+Ideas for dealing with destination mis-predict:
+- Need to annul the mis-fetched instrs, which means situation must be detected by EX
+  (i.e. destination known in EX).
+  - Makes annul occur later :(  Used to only depend on condition eval.
+- Need to somehow tag a branch instr with "PC that it was predicted to branch to", i.e.
+  extra 30b ffs in IF/DE
+
+MEM: outputs pc of br dest (T or NT), instr valid, br takenness, prediction.
+EX: annuls if pred wrong, or dest wrong.
+IF: output predicted destination
+(TBD: DE: convert false +ve)
+
+----
+March/April 2022
+
+Implemented fast SD host (see dev branch in mic-hw), and Linux driver.
+
+----
+19 May 2022
+
+Trying the build on Artix-7 with ISE and Vivado:  interestingly it doesn't meet timing
+at 50MHz, whereas the design does on Virtex-5.  ISE gets us to about 30ns/30MHz, Vivado about 45MHz.  (Haven't played with PAR options much.)
+
+Vivado is good to identify long paths:  fixed a couple!
+
+1: Mem fault -> WB fault calc -> WB annul -> MEM bypass valid (a function of DTC hit!) -> DE bypass -> PLC -> DE scoreboard/rlock
+Fixed this by removing dtc_hit dependency from bypass valididity (removes bypass from things like lwzux.  *** try out enabling a multi-cycle valid value -- yes, works just using 
+
+2: now DTC hit -> MEM stall -> EX annul (because branch depends on stall because MEM does part of the branch output which needs to be in sync) -> DE
+
+Gross gross :(
+
+Try to remove the dependency between EX/MEM for branches by fixing the ugly hack of MEM doing some of EX's work there.
+
+(Really this needs a whole new pipeline shape with fully-independent backend FUs/pipelines.)
+
+
+----
+21 May 2022
+
+Now... have moved the branch newpc/newmsr to a new "EXE2" stage, and inserted a skid buffer
+(ooer).  That breaks the critical path between MEM's stall (I.e. D$) and the rest.
+
+I *think*, in times of a cache miss and a full pipeline, this costs an extra cycle to
+propagate the "not stalled anymore" back to the front.  The graphics test takes 2400248 instead of 2400155.
+
+Seems to work though ;-o
+Vivado shows timing is 3ns better (closer to 60MHz target :P).
+V5 build: same
+ISE A7 build: 28ns (-2)
+
+Sim w/ linux: breaks, load from bad address.  Theory: update not working? bypass breaks something?
+(Still dies when disabling MEM GPR bypass!)
+EX bypass? (dies w/o that too)  XERCR bypass in MEM? (nope)
+
+-> Removing the skid buffer = linux boot bug goes away in verilator. (from -100M checkpoint).
+Hmmm.  (But: there's a later oops that isn't present in unmodified version. :( )
+Checker: doesn't show much interesting...
+- mfsrin returns 0 in interpreter
+- eventually oops (no differences logged) then zillions of writes of random data to GPIO output (!)
+
+Crack out the simple_random tests? :/
+
+- Compared the EX2 outputs to the MEM outputs -- found the bug, it's setting newpc_valid when WB annul was on!  Fixed that
+Now linux boot looks good.
+
+Add the SB back: breaks. fixé that please
+
+(The bug is that bypassing isn't performed from EX2, and EX2 doesn't publish to bypass logic that it "owns" a register
+value!  So, a bypass from an earlier MEM will give the wrong value.  BP logic must consider that in EX2!)
+
+[Later: was hard to remember how this worked.  First, the EXE2 stage mirrors what happened in MEM, except no longer
+in that module.  It depends on the thing after EXE moving on (it's parallel to MEM) and stalls when incoming stall
+from MEM occurs.  But, we know that whatever MEM does, newpc will be asserted at the right time because we own
+that logic in EX.  THEN, we can break the critical path by installing a skid buffer. (We couldn't do this w/o the former
+because otherwise all the newpc logic would need to be replicated in the SB as well.)]
+
+----
+13 Jun 2022
+
+Back to this after a while -- haven't fixed the EX2 problem above, but on trunk am working on resets
+again, considering http://fpgacpu.ca/fpga/verilog.html and https://olofkindgren.blogspot.com/2017/11/resetting-reset-handling.html
+modifying the entire design to use the "last assignment wins" idiom.  Quick test indicates ISE doesn't seem to
+generate extra logic for "not-reset" stuff, but Vivado 2019.1 does and this might explain the massive difference in performance.
+
+Step 1: move resets, don't change anything about number of signals reset
+Baseline V5: regs 13065, slice LUTs 19148, slices 8457, 16.368ns
+Baseline Artix: slice regs 9247, slice LUTs 16231, slices 5203, 34.754ns
+
+After step 1:
+V5: regs 13269, slice LUTs 19229, slices 8256, 16.351ns
+Artix: slice regs 8605, slice LUTs 12774, slices 5301, 32.767ns
+
+(Hmm, fairly large change in A7 usage at least?  Not the great perf increase I was looking for though.)
+
+Step 2: optimise set of reset things
+- TLB entries (do tlbia in SW!)
+- XER, DEC
+- Various DMA addr/counter regs in mic-hw
+
+V5: regs 13412, luts 19359, 7939 slices, 16.361ns
+Artix: slice regs 8562, LUTs 12741, slices 5628, 34.661ns (hah)
+
+(And, missed decode_regdeps reset_scoreboard which is v. critical path!)
+
+V5: 13412, 19360, 8314, 16.378ns
+Artix: 8562, 12799, 5236, 31.042ns
+
+Well, still.
+
+And now trying that on HW: works. committing changes.
+
+Set up BPI flash as 28F256P30 x16 (but can use only 16M I think?  generated MCS based on 16M)
+
+
+----
+21 Jun 2022
+
+Back to the EX2 skid buffer: removes 4ns of negative slack (now only .5ns away from 60MHz on A7).
+Critical path now becomes MEM.fault in WB->annul->annul input->cache->PLC
+
+Implemented EXE2 "writes gprX" path, to inhibit bypass of older/MEM/WB values if this hits:
+savegame-100M still crashes (very quickly, few thousand cycles). :(
+
+
+----
+22 Jun 2022
+
+Debug of EX2 bypass/bug.
+
+Re-generating simplerandom stuff.  Using ap225/e500 as standard reference
+
+simple_random <fname> <seed> <nr_instrs>
+
+Generate tests for seeds 12345-22345 at 500, 1K, 4K:
+
+         for sz in 4000 1000 ; do for seed in `seq 12345 22345` ; do echo $seed $sz ; ./simple_random /export/sr-tests/t_${seed}_${sz} $seed $sz ; done ; done
+
+(8K is poor at finding mismatches)
+NOTE original run_tests.sh script did a dd and mkhex inline (obvs a little slow to repeat at runtime).  So, trim:
+
+Looking at baseline of WIP EX2 but without SB (runs Linux), see fails on:
+ 12425_1000 12457_1000 13711_1000 14763_1000 15894_1000 16314_1000 18452_1000 18489_1000 19447_1000 20312_1000 
+
+Winding back to trunk (no EX2) at 3b4927f41ab3f31b6454ee33524433dcd297faf3, and some fails, arrrgh:
+ 13428_1000 16034_1000 16101_1000 17389_1000 17979_1000 18035_1000 20295_1000 21074_1000
+
+Try smaller.  Fails on:
+ 13401_250 13428_250 14025_250 14137_250 14858_250 14884_250 16034_250 16101_250 16130_250 16698_250 17389_250 17979_250 17995_250 18035_250 18592_250 18950_250 19626_250 20295_250 20878_250 21074_250 21203_250 21308_250 21989_250 22260_250
+
+Great...... debug this first, before getting into the EXE2 shite :(
+
+for i in `seq 20 20 250` ; do ./run_one.sh /net/ap225/export/sr-tests/t_ $i 13401 ; if [ $? == 1 ] ; then break ; fi ; done
+
+13401:  divwuo. r16,r13,r22 with r13=932d, r22=0. Doesn't set CR0 or XER correctly!
+-CR 000000009A024400    want
++CR 000000008a024400    (CR0.3, SO, isn't set)
+-XER 00000000E0000000   want
++XER 0000000020000000   (OVF and SO aren't set)
+
+13428 also divwo (size 5 breaks)
+
+14025_20 is curious, gpr differences too (possibly stuff after 5 (div) which calcs stuff on CRs - try 5 then 20)
+
+Ah.  3346a8a0ea3e1158f34ea5397d6de93c5a50d6ea fixed an issue where res_div_ov was sticking 1 and making it look like
+a subsequent instruction was overflowing.  But, the fix there was to make ov 0 when divider is idle.
+In 14025, divide completes during a cache miss from an earlier STW; the result is not captured until the pipeline
+un-stalls, yet (due to the fix) the OV is zero again by the time it's captured.  Re-fix this:  hold both int and ov outputs
+of divider, but make the ov flag from divider depend on divide_instr. (i.e. an AND gate.)
+
+ for s in 250 500 1000 4000 ; do ./run_tests.sh /net/ap225/export/sr-tests/t_ $s ; done
+
+Having fixed that:
+0aa5a416289efee4aae48fe8e70ef56cb110d5ed + seed (12345-22345) passes on: 250, 500, 1000, 4000 -- excellent!
+
+Return to EXE2 branch; with SB out/off:  (12345-22345) 250, 500, 1000, 4000 -- excellent.
+
+Even better, some fails appear on size 250 with the SB!
+
+13711_250       - 20 works, 40 dies; 34 works, 35 dies
+14955_250
+17813_250
+18489_250
+
+13711 35:       subfme. r5,r18
+-GPR5 0000000000000000  want
++GPR5 00000000ffff7fff
+-CR 000000002000201F
++CR 000000008000201f
+-XER 0000000000000000   want
++XER 0000000020000000
+
+OK, got it.  Scenario is a branch following a STW, but the branch is delayed by I$ miss awhile.
+The STW goes into EXE (EXE valid) and MEM (using EXE's FF's state) signals stall/miss.
+The skid buffer wakes up and captures EXE's outputs -- MEM now sees EXE2 outputs (held the same)
+and EXE goes invalid.
+The stall input to EXE is 1, i.e. the invalid stage is stalled by EXE2, which is full.
+Meanwhile, the branch instr is fetched and the PLC bubble-squash mechanism lets it catch up.
+When DE output is valid (it's "in EX"), the branch is valid but doing_branch=0 because there's a stall coming from MEM/EXE2.
+Because doing_branch=0, EXE2's branch logic doesn't fire and annul is inhibited.
+Effect: the branch doesn't annul, doesn't assert e2_newpc_valid.
+
+(Example of bubble squash: instruction after a load misses
+ in IF, so load progresses into EX followed by bubbles.  Load stalls, which
+ causes the skid buffer to capture EX's outputs and (a cycle later) forward
+ the stall into EX.  EX is empty.  The instruction fetch miss resolves and
+ instructions creep on up into EX.)
+
+Possible fix 1:         disable the bubble-squash mechanism in PLC.
+- Linux boots in sim now, good.
+or 2:                   base whether the branch can progress into EXE2 on the stall *out* to DE
+                        (e.g. the effective "consume" signal), *not* the stall input from downstream.
+- This would permit bubble-squash
+- This would allow branch to progress upon a bubble/EXE being invalid.
+
+#2 is much nicer.  FIXED IT YAY.
+
+Ultimately this is a great example of:
+- Tying together verilog modules with multiple pipeline stages being gross
+- MEM needing to care about branches was gross, but branches needing to care about
+  MEM's stalling is similarly gross.
+- Needing to have two completely unrelated pipelines!
+
+FPGA build:
+
+V5 initially failed to meet timing (FFS); removed some debug logic.  Also upped CLK to 70MHz ;-)
+Lovely, now it's MUCH worse: V5 29.879ns!  Fark.
+2nd time (back to 60MHz) it meets timing again.  ffs.
+
+HDMI is broken.  WAT.  (doesn't work even on an old bitstream... no signal. FW finds TFP410 OK. Hm.)
+
+a7 build is ~32.9ns via ISE, but Vivado is 0.829ns away from 60MHz, which is nice.
+
+Critical path on v7 in vivado is now EX.fault -> TLB -> cache -> MEM stall -> SB capture, which figures.  But that's long.
+
+(Again, v5 build meets timing and seems OK, so committing this:  can always disable the SB if it causes issues.)
+
+
+----
+Jul/Aug 2022
+
+Have been working on Lattice ECP5 build w/ Yosys.  The original
+mahoosive auto-generated decoder seriously upset Yosys; refactored
+mk_decode.py to experiment with hierarchical/nested decode based on
+if/if, if/case, case/if, case/case to see which the tools prefer.
+
+The decoder now builds w/ Yosys.  Next issue is the cache uses dual
+ported BRAM (a bit lazy but it was useful).  This didn't infer correctly
+for the ECP5 target.  Hacked around that w/ some explicitly-instantiated
+BRAMs.  The CPU now builds, but it's pretty slow.  Current issue is having
+difficulties with the GPRF and an explosion of logic/FFs.
+
+
+--------------------------------------------------------------------------------
+To do:
+
+
+- Loads/stores, memory interface			DONE 17/3/20
+- Mul/multi-cycle EXE					DONE 18/3/20
+- Speed up MUL (64b add only for MULHW*)
+- Divide						DONE
+-- Emulated/prog interrupt				DONE 29/3/20
+--- Implement Rc/OV					DONE 26/5/20
+-- Implement hardware divider....			DONE 29/12/20
+- Shifts/masks						DONE 25/3/20
+- Cntlz							DONE 24/3/20
+- Load/store multiple					DONE 23/3/20
+- Condition calcs					DONE 24/3/20
+- Trap instrs						DONE 25/3/20
+- Run simple_random test				DONE 27/3/20
+- IRQs (w/test SPRs)					DONE 21/6/20
+- DEC and TB (and IRQ of DEC)				DONE 21/6/20
+- Hi/lo reset vector config				DONE 14/6/20
+- Caches						DONE 26/4/20
+-- IFetch from cache (rewritten)			DONE 25/5/20
+-- MEM from data cache!					DONE 26/5/20
+-- LRU/better replacement policy
+- CMOs; DCBZ, C, CI, I, IALL				DONE 8/6/20
+-- Instructions wired up				DONE 14/6/20
+-- Simple HIDn invalidate-all (reset won't reset!)	DONE 6/7/20
+-- Icache invalidation (somehow from MEM)		DONE 6/7/20
+-- Disable I$/D$ on startup
+- lwarx/stwcx: conditions, reservation			DONE 21/6/20
+- Alignment faults!!!!					DONE 19/7/20
+-- Implement "unaligned within 64b" support		DONE 23/12/20 (check/fiddle w/logic)
+-- Implement unaligned faults in MR-ISS, check Linux	DONE 27/12/20
+-- Implement unaligned within CL support (2 cycles)
+- Decouple cache operations from MEM
+-- Combine 2x32b writes for basic WC/streaming
+-- Store buffer / fast DCBZ
+-- Prefetch in background
+-- Snoop port (yes!)
+- Proper memory interface (MIC)				DONE 29/5/20
+- Get simple_random working/executing in sim		DONE 27/3/20
+- Write simple init/"OS" for syscalls/C tests		DONE 29/3/20
+- Get ppc_tests working in sim				DONE 29/3/20
+- Make reg locking synthesisable/refactor DE            DONE 13/1/22
+- Make regs/wires naming consistent!
+- MSR, IR/DR, privilege checking in decode
+- Synthesis: latch reports on 'name'			DONE
+- Synthesis: tristates on gpregs??                      DONE
+- Pipeline mask/shift?
+- Tidy all the unused input_valid signals
+- Implement PROG exceptions: ILL vs PRIV vs trap	DONE 29/3/20
+-- Need to extend size of fault code
+- Implement FP decode/traps
+- Remove unused signals/enums
+-- E.g. DE_IMM_BO
+- Implement verilated // simple_random harness
+- Harmonise verilator wrapper & tb_mr_cpu_top		DONE 27/5/20
+- MMU							DONE
+-- BATs							DONE 14/9/20
+-- TLB							DONE 5/10/20
+--- TLBI, fix req MEM-to-IF				DONE 14/12/20
+-- I/D uTLBs are more ERATs, inval freq; make L2 TLB
+-- SRs							DONE 26/10/20
+-- HTAB/full EA-VA-RA translation			DONE 14/12/20
+-- Implement R/C PTE update (& cache arb locking)
+- Performance work & optimisation
+-- Perfctrs						DONE 24/5/21
+--- with APB/debug channel viewer
+-- Bypass/forwarding                                    DONE 16/1/22
+-- Buffering between DE and IF to avoid decode/rlock    DONE 3/4/21
+   to stall to IF ITLB/cache control loop.
+-- Stall from MEM/DTC (post-tags, miss) -> IF is        DONE 3/4/21
+   another very long loop that would benefit
+-- Remove the stall path entirely? :P
+-- Merge FSMs in mr_cpu_mic, make request faster!
+-- Branch predictor
+--- Simple/shitty/loop detector
+--- More elaborate
+- PMU (TLB miss, $ miss, op stall, multicycle EX ops)
+- Small config (small *,/, no mmu, I/D TCMs?)
+-- No MMU, BAT-only, BAT+MMU options                    DONE 4/1/22
+
+Testing:
+- Harmonise run_one, run_tests.sh into a single thing,
+  to run ISS/Verilator/iverilog easily.
+- Checker/validation of MR-ISS against verilator	DONE 11/1/21
+- Implementation (size/perf) survey on different FPGAs
+
+System ToDo:
+- Script to assemble MIC
+- EMI to MIC bridge					DONE 28/5/20
+-- Fix MIC i/f bug on giving wr_data_rdy too early	DONE 30/5/20
+- MIC to APB						DONE 29/5/20
+- APB UART						DONE 29/5/20
+- Assemble simple system w/ UARTs, video, SRAM		DONE 29/5/20
+-- Verilator full sim					DONE 30/5/20
+- IRQ controller					DONE 13/1/21
+- Debug agent from FT232/USB				DONE 6/12/20
+-- simple block/storage/network over debug/polling
+- First demo on FPGA:	ac701 board plasma-hello!	DONE 2/6/20
+-- Demonstrate on Virtex5 (after much XST shite)	DONE 3/6/20
+- Demo Linux booting                                    DONE 25/1/21
+- Audio output/I2S					DONE 6/12/20
+- Twisted 1BPP (and 2/4) order
+- Second 16MB bank on LTXC5 board                       DONE 29/4/21
+- LTXC5/IM-LT3 comms, SDRAM controller
+- PS2 input/keyboard (mouse?)                           DONE 22/3/21
+- Polled SPI, SD root                                   DONE 30/4/21
+-- Better SPI (e.g. overlap wr. with transmission)	DONE 30/11/21
+- Proper SD/SDIO controller w/ DMA (use ORPSoC one?)    DONE 19/4/22
+- SPI ethernet/ENC28J60					DONE 6/12/21
+- Proper Ethernet (RMII PHY)
+
+Software:
+- Simple monitor: GPIO commands, xmodem download?	DONE, WIP early June '20
+- On-FPGA simple_random (w/ icbi)			DONE
+- uboot
+- Linux platform for MR3				DONE
+-- mr-uart						DONE
+-- SPI SD                                               DONE 30/4/21
+-- SPI ethernet/ENC24J60                                DONE 6/12/21
+-- I2S
+-- MR-SD host driver                                    DONE 19/4/22
+- NetBSD ppc MR3 platform
+
+
+Bugs caused by me removing something I didn't think useful until I discovered it was: 	1
+Bugs from either iverilog having a bug or me doing something undef:	1
+Number of times I've rewritten the CR flags-setting logic:	4
+
+
+RAM inference was a huge pain: some idioms work only on Vivado builds; some
+pretend to work (XST reports correct recognition of BRAMs) BUT I found writes to
+memory didn't work: ran uncached, added litescope, watched instruction trace;
+watched BWE (they were moving).  Moved to mem_test program -- noticed stack
+setup was wrong (noting on stack); writes totally failed.
+
+Also XST RAM init was horrendous: if $readmemh doesn't find a file, it's a
+non-fatal warning.  If it finds the file but it's not the right size, it *WARNS*
+that RAM is partially initialised (then proceeds to initialise none of it)!
+I.e. say one thing, do another.
+

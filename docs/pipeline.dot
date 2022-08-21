@@ -1,0 +1,364 @@
+digraph MattRISC {
+
+  labelloc="t";
+  label="MattRISC pipeline diagram, 0.2 19/10/2019";
+
+  compound=true;
+  clusterrank="local";
+  remincross=true;
+  pencolor=navy;	// Cluster colour
+
+  node [fontname = "helvetica"];
+
+  rankdir=LR;
+//    rank = same;
+  ranksep = 1.0;
+  splines=ortho;
+//  outputMode=edgesfirst;
+
+
+  // Note cluster names must start cluster_ -- yuck!
+
+  subgraph cluster_IF {
+    label = "IF";
+    style = bold;
+
+    edge [arrowsize=0.5];
+
+    // Registers:
+    subgraph cluster_IF_out {
+      label = "Output regs";
+      style = dashed;
+
+      if_pc [shape=square];
+      if_msr [shape=square];
+      if_fault [shape=square];
+      // Registered cache output:
+      if_icache [shape=square, style=bold];
+    }
+    if_current_pc [shape=square];
+
+    // Processes:
+    itlb [shape=hexagon];
+    pc_mux;
+    fetch_pc;
+    pc_inc;
+    update_pc_msr;
+
+    // Connections:
+    if_current_pc -> pc_mux	[constraint=false];
+    pc_inc -> if_current_pc	[constraint=false];
+    pc_mux -> fetch_pc 		[constraint=false];
+    fetch_pc -> itlb
+    fetch_pc -> if_pc;
+    fetch_pc -> pc_inc		[constraint=false];
+
+    update_pc_msr -> pc_mux	[constraint=false];
+    update_pc_msr -> if_msr;
+
+    itlb -> if_icache		[constraint=false];
+    itlb -> if_fault;
+  }
+
+
+
+
+  subgraph cluster_DE {
+    label = "DE";
+    style = bold;
+
+    edge [arrowsize=0.5, color="#800000"];
+
+    // Registers:
+    subgraph cluster_DE_out_all {
+      // This 'supercluster' groups all outputs together, which is much nicer.
+      style = invis;
+
+      subgraph cluster_DE_out {
+        label = "Output instruction state";
+        style = dashed;
+
+        de_inst [shape=square];
+        de_pc [shape=square];
+        de_msr [shape=square];
+        de_fault [shape=square];
+      }
+
+      subgraph cluster_DE_out2 {
+        label = "Output regs";
+        style = dashed;
+
+        de_out_a [shape=square];
+        de_out_b [shape=square];
+        de_out_c [shape=square];
+        de_out_d [shape=square];
+      }
+    }
+
+    // The architected state is stored in DE; it's not an output though:
+    subgraph cluster_DE_arch_state {
+      // Arch state:
+      label = "Architected state";
+      style = rounded;
+
+      de_gprs [shape=square];
+      de_sprs [shape=square];  // Includes CTR
+      de_lr [shape=square];
+      de_xercr [shape=square];
+      de_sr [shape=square];
+      de_dec [shape=square];
+      de_tb [shape=square];
+    }
+
+    // Processes
+    decoder;
+    immediate_gen;
+
+    // Connections
+    if_pc -> de_pc;
+    if_msr -> de_msr;
+    if_fault -> de_fault;
+    if_icache -> decoder;
+    if_msr -> decoder;
+
+    decoder -> immediate_gen;
+    decoder -> de_fault;
+    decoder -> de_inst;		// Represents decoded instr, any inst32 bitmap, etc.
+
+    de_gprs -> de_out_a;
+    de_sprs -> de_out_a;
+    de_lr -> de_out_a;
+    immediate_gen -> de_out_a;
+
+    de_gprs -> de_out_b;
+    immediate_gen -> de_out_b;
+
+    de_gprs -> de_out_c;
+    de_sprs -> de_out_c;
+    de_lr -> de_out_c;
+    immediate_gen -> de_out_c;
+    de_sr -> de_out_c;
+    de_dec -> de_out_c;
+    de_tb -> de_out_c;
+
+    de_xercr -> de_out_d;
+  }
+
+
+
+  subgraph cluster_EXE {
+    label = "EXE";
+    style = bold;
+
+    edge [arrowsize=0.5, color="#808000"];
+
+    // Registers
+    subgraph cluster_EXE_out_all {
+      // This 'supercluster' groups all outputs together, which is much nicer.
+      style = invis;
+
+      subgraph cluster_EXE_out {
+        label = "Output instruction state";
+        style = dashed;
+
+        exe_inst [shape=square];
+        exe_pc [shape=square];
+        exe_msr [shape=square];
+        exe_fault [shape=square];
+      }
+
+      subgraph cluster_EXE_out2 {
+        label = "Output regs";
+        style = dashed;
+
+        exe_R0 [shape=square];
+        exe_R1 [shape=square];
+        exe_R2 [shape=square];
+        exe_RC [shape=square];
+      }
+    }
+
+    // Processes:
+    exe_int;
+    exe_brdest;
+    exe_brcond;		// FIXME, does 'annul'
+    exe_special;
+    exe_cond;
+    exe_pcinc;
+    exe_add_r0;
+
+    // Connections
+    de_inst -> exe_inst		[weight=10];
+    de_pc -> exe_pc		[weight=10];
+    de_msr -> exe_msr		[weight=10];
+    de_fault -> exe_fault	[weight=10];
+
+    // In
+    de_pc -> exe_pcinc;
+    de_out_c -> exe_cond;
+    de_out_d -> exe_cond;
+    de_out_a -> exe_special;
+    de_out_a -> exe_brdest;
+    de_out_c -> exe_brdest;
+    de_inst -> exe_brdest;	// FIXME, also needs flag for AA from decode
+    de_out_a -> exe_int;
+    de_out_b -> exe_int;
+    de_out_c -> exe_int;
+    de_out_d -> exe_int;
+    de_msr -> exe_int; 		// FIXME, this just pipes right out to R1
+    de_inst -> exe_brcond;
+    de_out_d -> exe_brcond;
+
+    // Internal
+    // Colouring signals from EXE-internal stuff differently, to distinguish them.
+    exe_int -> exe_cond 	[arrowsize=0.5, color="#a06020"];
+
+    // Out
+    exe_int -> exe_R0 		[arrowsize=0.5, color="#a06020"];
+    exe_special -> exe_R0 	[arrowsize=0.5, color="#a06020"];
+    de_out_a -> exe_R0;
+    de_out_c -> exe_R0;
+    exe_add_r0 -> exe_R0;
+
+    exe_int -> exe_R1 		[arrowsize=0.5, color="#a06020"];
+    exe_pcinc -> exe_R1 	[arrowsize=0.5, color="#a06020"];
+    de_out_b -> exe_R1;
+    de_out_c -> exe_R1;
+    //    de_msr -> exe_R1;  // Currently part of int unit :-/
+
+    exe_int -> exe_R2 		[arrowsize=0.5, color="#a06020"];
+    exe_pcinc -> exe_R2 	[arrowsize=0.5, color="#a06020"];
+    exe_brdest -> exe_R2 	[arrowsize=0.5, color="#a06020"];
+    de_out_c -> exe_R2;
+
+    exe_cond -> exe_RC 		[arrowsize=0.5, color="#a06020"];
+
+    // Feedback/forwarding:
+    exe_R0 -> exe_add_r0;
+  }
+
+
+
+  subgraph cluster_MEM {
+    label = "MEM";
+    style = bold;
+
+    edge [arrowsize=0.5, color="#008000"];
+
+    // Registers
+    subgraph cluster_MEM_out {
+      label = "Output instruction state";
+      style = dashed;
+
+      mem_inst [shape=square];
+      mem_pc [shape=square];
+      mem_msr [shape=square];
+      mem_fault [shape=square];
+    }
+
+    subgraph cluster_MEM_out2 {
+      label = "Output regs";
+      style = dashed;
+
+      mem_R0 [shape=square];
+      mem_R1 [shape=square];
+      mem_RC [shape=square];
+      // Registered output
+      mem_dcache [shape=square, style=bold];
+    }
+
+    // Processes
+    dtlb [shape=hexagon];
+    mem_newpc_msr;		// RFI is performed like a branch-that-writes-MSR
+
+    // Connections
+    exe_inst -> mem_inst;
+    exe_pc -> mem_pc;
+    exe_msr -> mem_msr;
+    exe_fault -> mem_fault;
+
+    exe_R0 -> mem_R0;
+    exe_R1 -> mem_R1;
+    exe_RC -> mem_RC;
+    exe_R0 -> dtlb;		// Addr
+    exe_R2 -> mem_dcache;	// Data
+
+    exe_R1 -> mem_newpc_msr;	// Combined update for clarity
+    exe_R2 -> mem_newpc_msr;	// MSR R1, PC R2
+
+    dtlb -> mem_fault;
+    dtlb -> mem_dcache;
+  }
+
+
+
+  subgraph cluster_WB {
+    label = "WB";
+    style = bold;
+
+    edge [arrowsize=0.5, color="#008080"];
+
+    // Registers
+
+    // Processes
+    wb_bswp_sxt;
+    wb_newpc_msr;	// Combined new PC/MSR for clarity
+    wb_fault_calc;
+
+    wb_wr_gpr0;
+    wb_wr_gpr1;
+    wb_wr_lr;
+    wb_wr_spr;
+    wb_wr_xercr;
+    wb_wr_sr;
+
+    // Connections
+    mem_dcache -> wb_bswp_sxt;
+    mem_fault -> wb_fault_calc;
+    mem_msr -> wb_fault_calc;
+    wb_fault_calc -> wb_newpc_msr;
+
+    mem_R0 -> wb_wr_gpr0;
+    mem_R0 -> wb_wr_gpr1;
+    mem_R0 -> wb_wr_lr;
+    mem_R0 -> wb_wr_spr;
+    mem_R0 -> wb_wr_sr;
+
+    mem_R1 -> wb_wr_gpr0;
+    mem_R1 -> wb_wr_lr;
+    mem_R1 -> wb_wr_sr;
+
+    mem_RC -> wb_wr_xercr;
+
+    wb_bswp_sxt -> wb_wr_gpr0;
+    mem_pc -> wb_wr_spr;  // FIXME
+    mem_msr -> wb_wr_spr; // FIXME
+
+    {rank=same; wb_wr_gpr0, wb_wr_gpr1, wb_wr_lr, wb_wr_spr, wb_wr_sr, wb_wr_xercr}
+  }
+
+
+  // Note, this isn't a cluster!
+  subgraph backard_signals {
+    // Backward signals:
+    style = invis;
+
+    edge [constraint=false, arrowsize=0.5, color="#a080a0"];
+
+    // new_pc and new_msr from MEM and WB stages go back to IF:
+    mem_newpc_msr -> update_pc_msr;
+    wb_newpc_msr -> update_pc_msr;
+
+    // Writeback register values to arch state in DE:
+    wb_wr_gpr0 -> de_gprs;
+    wb_wr_gpr1 -> de_gprs;
+    wb_wr_lr -> de_lr;
+    wb_wr_spr -> de_sprs;
+    wb_wr_sr -> de_sr;
+    wb_wr_xercr -> de_xercr;
+  }
+
+  // Not shown:
+  // - Annul signals from EX and WB, which effectively empty/disable
+  //   earlier stages.
+}
